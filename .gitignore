@@ -1,0 +1,11 @@
+# virtual environment: anyone can rebuild it from requirements.txt
+.venv/
+
+# Python cache files, generated automatically
+__pycache__/
+
+# Jupyter autosave files
+.ipynb_checkpoints/
+
+# pipeline output: data snapshots don't belong in the code repo
+data/
