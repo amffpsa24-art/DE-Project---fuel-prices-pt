@@ -15,3 +15,4 @@ data/
 
 # Credentials: database passwords stay on this machine
 .env
+.env.local
