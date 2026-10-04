@@ -2,7 +2,8 @@
 -- STAR SCHEMA for the fuel prices warehouse
 -- ============================================
 -- Created: 04/10/2026
--- Run with:  psql -U postgres -d fuel_prices -f sql/schema.sql
+-- Updated: 04/10/2026 (dim_postos as SCD Type 2)
+-- Run with:  psql "<connection string>" -f sql/schema.sql
 --
 -- Safe to run more than once: every table uses IF NOT EXISTS.
 -- Order matters: dimensions first, then the fact table that references them.
@@ -35,12 +36,15 @@ CREATE TABLE IF NOT EXISTS dim_combustivel (
 
 
 -- --------------------------------------------
--- dim_postos: one row per station (SCD Type 1: changes overwrite the old values)
+-- dim_postos: one row per VERSION of a station (SCD Type 2)
 -- --------------------------------------------
--- Natural key: DGEG's own station Id.
--- An upgrade to SCD Type 2 would add a surrogate key, because one station would then have several rows.
+-- When a station's details change (new brand, new name...), the old row is closed
+-- and a new row is added, so history keeps the details that were true at the time.
+--   posto_sk   = surrogate key: our own ID, one per version (what the fact table points to)
+--   posto_id   = natural key: DGEG's station Id, the same for every version of a station
 CREATE TABLE IF NOT EXISTS dim_postos (
-    posto_id         INTEGER           PRIMARY KEY,   -- DGEG "Id"
+    posto_sk         SERIAL            PRIMARY KEY,
+    posto_id         INTEGER           NOT NULL,      -- DGEG "Id"
     nome             TEXT              NOT NULL,
     marca            TEXT,
     tipo_posto       TEXT,                            -- e.g. 'Outro', 'Autoestrada', 'Hipermercado'
@@ -51,9 +55,17 @@ CREATE TABLE IF NOT EXISTS dim_postos (
     distrito         TEXT,
     latitude         DOUBLE PRECISION,                -- float is fine here: coordinates are never summed like money
     longitude        DOUBLE PRECISION,
-    primeira_vez     DATE              NOT NULL,      -- first snapshot this station appeared in
-    ultima_vez       DATE              NOT NULL       -- latest snapshot it appeared in (old date = station may have closed)
+    valido_de        DATE              NOT NULL,      -- first day this version was true
+    valido_ate       DATE              NOT NULL DEFAULT '9999-12-31',  -- last day it was true ('9999-12-31' = still current)
+    atual            BOOLEAN           NOT NULL DEFAULT TRUE,          -- TRUE only on the current version
+
+    -- A station can't have two versions starting on the same day
+    UNIQUE (posto_id, valido_de),
+    CHECK (valido_ate >= valido_de)
 );
+
+-- At most ONE current version per station (a "partial" unique index: only applies to rows WHERE atual)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_dim_postos_atual ON dim_postos (posto_id) WHERE atual;
 
 
 -- --------------------------------------------
@@ -62,7 +74,7 @@ CREATE TABLE IF NOT EXISTS dim_postos (
 -- Grain: one row per station x fuel x snapshot day
 CREATE TABLE IF NOT EXISTS fact_precos (
     data_key          INTEGER       NOT NULL REFERENCES dim_data (data_key),
-    posto_id          INTEGER       NOT NULL REFERENCES dim_postos (posto_id),
+    posto_sk          INTEGER       NOT NULL REFERENCES dim_postos (posto_sk),   -- the station VERSION valid that day
     combustivel_id    INTEGER       NOT NULL REFERENCES dim_combustivel (combustivel_id),
     preco             NUMERIC(6,3)  NOT NULL CHECK (preco > 0),  -- exact decimals, never FLOAT for money
     data_atualizacao  TIMESTAMP,                                 -- when the STATION last changed this price (Lisbon local time)
@@ -70,12 +82,12 @@ CREATE TABLE IF NOT EXISTS fact_precos (
 
     -- Idempotency: the same station + fuel + day can only exist once,
     -- so rerunning the pipeline on the same day cannot create duplicates
-    PRIMARY KEY (data_key, posto_id, combustivel_id)
+    PRIMARY KEY (data_key, posto_sk, combustivel_id)
 );
 
 -- The primary key already indexes queries that start with data_key.
 -- These two help queries that filter by station or by fuel.
-CREATE INDEX IF NOT EXISTS idx_fact_precos_posto       ON fact_precos (posto_id);
+CREATE INDEX IF NOT EXISTS idx_fact_precos_posto       ON fact_precos (posto_sk);
 CREATE INDEX IF NOT EXISTS idx_fact_precos_combustivel ON fact_precos (combustivel_id);
 
 

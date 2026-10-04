@@ -2,8 +2,11 @@
 -- LOAD FROM STAGING: moves stg_precos into the star schema
 -- ============================================
 -- Created: 04/10/2026
+-- Updated: 04/10/2026 (dim_postos as SCD Type 2)
 -- Run by etl/load.py, inside one transaction, after stg_precos has been filled.
 -- Order matters: the three dimensions first, then the fact table that references them.
+--
+-- Assumption: snapshots are loaded in date order (daily runs are; backfill.py sorts its files).
 
 
 -- 1. dim_data: add the snapshot day(s) if they don't exist yet
@@ -31,43 +34,56 @@ WHERE NOT EXISTS (
 );
 
 
--- 3. dim_postos: add new stations, overwrite details of known ones (SCD Type 1)
--- DISTINCT ON keeps ONE row per station: staging has one row per station x fuel,
--- and ON CONFLICT DO UPDATE refuses to update the same station twice in one statement.
+-- 3a. dim_postos, SCD Type 2: CLOSE the current version of stations whose details changed
+-- Staging has one row per station x fuel, so DISTINCT ON keeps one row per station first.
+-- IS DISTINCT FROM compares the whole list of columns and treats two NULLs as equal.
+-- "snapshot_date > valido_de" ignores changes on the same day the version started (e.g. a same-day rerun).
+UPDATE dim_postos AS d
+SET valido_ate = s.snapshot_date - 1,     -- the old version was true until yesterday
+    atual      = FALSE
+FROM (
+    SELECT DISTINCT ON (posto_id) *
+    FROM stg_precos
+    ORDER BY posto_id, combustivel
+) AS s
+WHERE d.posto_id = s.posto_id
+  AND d.atual
+  AND s.snapshot_date > d.valido_de
+  AND (d.nome, d.marca, d.tipo_posto, d.morada, d.localidade, d.cod_postal,
+       d.municipio, d.distrito, d.latitude, d.longitude)
+      IS DISTINCT FROM
+      (s.nome, s.marca, s.tipo_posto, s.morada, s.localidade, s.cod_postal,
+       s.municipio, s.distrito, s.latitude, s.longitude);
+
+
+-- 3b. dim_postos: ADD a current version for every station that has none
+-- This covers both brand-new stations and the stations just closed in step 3a.
 INSERT INTO dim_postos (
     posto_id, nome, marca, tipo_posto, morada, localidade, cod_postal,
-    municipio, distrito, latitude, longitude, primeira_vez, ultima_vez
+    municipio, distrito, latitude, longitude, valido_de
 )
-SELECT DISTINCT ON (posto_id)
-    posto_id, nome, marca, tipo_posto, morada, localidade, cod_postal,
-    municipio, distrito, latitude, longitude, snapshot_date, snapshot_date
-FROM stg_precos
-ORDER BY posto_id
-ON CONFLICT (posto_id) DO UPDATE SET
-    nome         = EXCLUDED.nome,
-    marca        = EXCLUDED.marca,
-    tipo_posto   = EXCLUDED.tipo_posto,
-    morada       = EXCLUDED.morada,
-    localidade   = EXCLUDED.localidade,
-    cod_postal   = EXCLUDED.cod_postal,
-    municipio    = EXCLUDED.municipio,
-    distrito     = EXCLUDED.distrito,
-    latitude     = EXCLUDED.latitude,
-    longitude    = EXCLUDED.longitude,
-    -- LEAST / GREATEST keep these right even when loading old snapshots after newer ones (backfill)
-    primeira_vez = LEAST(dim_postos.primeira_vez, EXCLUDED.primeira_vez),
-    ultima_vez   = GREATEST(dim_postos.ultima_vez, EXCLUDED.ultima_vez);
+SELECT DISTINCT ON (s.posto_id)
+    s.posto_id, s.nome, s.marca, s.tipo_posto, s.morada, s.localidade, s.cod_postal,
+    s.municipio, s.distrito, s.latitude, s.longitude, s.snapshot_date
+FROM stg_precos AS s
+WHERE NOT EXISTS (
+    SELECT 1 FROM dim_postos AS d
+    WHERE d.posto_id = s.posto_id AND d.atual
+)
+ORDER BY s.posto_id, s.combustivel;
 
 
--- 4. fact_precos: the prices, now pointing to the dimension rows above
+-- 4. fact_precos: each price points to the station VERSION that was valid on the snapshot day
 -- ON CONFLICT DO NOTHING = idempotent: rerunning the same day skips rows that already exist
-INSERT INTO fact_precos (data_key, posto_id, combustivel_id, preco, data_atualizacao)
+INSERT INTO fact_precos (data_key, posto_sk, combustivel_id, preco, data_atualizacao)
 SELECT
     TO_CHAR(s.snapshot_date, 'YYYYMMDD')::INTEGER,
-    s.posto_id,
+    d.posto_sk,
     c.combustivel_id,
     s.preco,
     s.data_atualizacao
 FROM stg_precos AS s
+JOIN dim_postos      AS d ON d.posto_id = s.posto_id
+                         AND s.snapshot_date BETWEEN d.valido_de AND d.valido_ate
 JOIN dim_combustivel AS c ON c.nome = s.combustivel
-ON CONFLICT (data_key, posto_id, combustivel_id) DO NOTHING;
+ON CONFLICT (data_key, posto_sk, combustivel_id) DO NOTHING;
