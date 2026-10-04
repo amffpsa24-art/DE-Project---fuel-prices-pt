@@ -1,0 +1,28 @@
+# ============================================
+# Streamlit theme: clean corporate look
+# ============================================
+# Safe to commit: no secrets here (those live in secrets.toml, which is git-ignored).
+
+[theme]
+base = "light"
+primaryColor = "#0E5A73"              # petrol blue: buttons, sliders, selected tab
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F4F6"  # inputs and sidebar
+textColor = "#1C2430"                 # deep slate rather than pure black
+linkColor = "#0E5A73"
+borderColor = "#DCE1E7"
+showSidebarBorder = true
+baseRadius = "6px"                    # slightly rounded, nothing bubbly
+greenColor = "#1F7A5A"                # price went down
+redColor = "#B5462B"                  # price went up
+dataframeHeaderBackgroundColor = "#F2F4F6"
+
+# One typeface for everything: IBM Plex Sans, engineered and neutral, with clear figures for prices
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+headingFontWeights = 600
+metricValueFontWeight = 500
+metricValueFontSize = "1.6rem"
+
+[theme.sidebar]
+backgroundColor = "#F2F4F6"
+secondaryBackgroundColor = "#FFFFFF"
