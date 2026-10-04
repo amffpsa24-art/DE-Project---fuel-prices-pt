@@ -1,6 +1,10 @@
 # Fuel Prices PT
 
-A daily ETL pipeline that collects the price of every fuel at every petrol station in Portugal and models it as a star schema in a hosted PostgreSQL database, building a price history that the official source does not keep. It runs automatically every day on GitHub Actions.
+[![Open the live dashboard](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fuel-prices-pt.streamlit.app/)
+
+**Live dashboard: [fuel-prices-pt.streamlit.app](https://fuel-prices-pt.streamlit.app/)**
+
+A daily ETL pipeline that collects the price of every fuel at every petrol station in Portugal and models it as a star schema in a hosted PostgreSQL database, building a price history that the official source does not keep. It runs automatically every day on GitHub Actions, and a public Streamlit dashboard reads the warehouse.
 
 ![Phase 1 architecture](docs/images/architecture.png)
 
@@ -40,6 +44,7 @@ The pipeline follows an **extract → transform → load** structure, with each 
 | Load | [`etl/load.py`](etl/load.py) | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
 | Orchestration | [`pipeline.py`](pipeline.py) | Runs the three steps in sequence |
 | Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | Runs the pipeline every day on GitHub Actions |
+| Dashboard | [`dashboard/app.py`](dashboard/app.py) | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
 
 Example run:
 
@@ -81,6 +86,26 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 - **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV is uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step fails, so the raw data is never lost to a load error.
 - **Correct dates:** the job runs with the `Europe/Lisbon` time zone, so each snapshot gets the Portuguese date.
 - **Safe reruns:** because loads are idempotent, a retried or manual run on the same day never duplicates data.
+
+## Dashboard
+
+The [live dashboard](https://fuel-prices-pt.streamlit.app/) shows today's average prices on a price board, then lets anyone explore the data by fuel, period, district, municipality, station type, brand or station name:
+
+- **Map** of every station, coloured from cheapest to most expensive, with the 10 cheapest alongside
+- **Evolution** of average prices over time, by district or comparing several fuels
+- **Stations**: the full filtered list, downloadable as CSV
+- **Price changes**: which stations raised or cut prices since the previous snapshot
+- **Station history**: one station's prices over time, plus every version of its details (SCD Type 2)
+- **Brands**: average price per brand
+- **How it's built**: the pipeline behind the data
+
+How it connects to the warehouse:
+
+- **Read-only access.** The app uses its own database user, [`dashboard_reader`](sql/dashboard_role.sql), which can only `SELECT` from the view and the dimensions. Its credentials live in Streamlit Cloud's secrets, never in the repository.
+- **One view as the interface.** The app reads [`vw_precos`](sql/views.sql), the star schema joined into one table, plus a `dias_desde_atualizacao` column used to leave out stale prices.
+- **Filtering in SQL.** Every filter becomes a parameterised `WHERE` clause, and history is aggregated in the database, so only the rows needed reach the app.
+- **Caching.** Query results are cached for an hour: the data changes once a day, so most visits don't touch the database at all.
+- **Honest charts.** Days without a snapshot are drawn as dotted segments, and price changes are always compared with the previous snapshot actually available.
 
 ## Data model
 
@@ -187,14 +212,14 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 
 ![Roadmap](docs/images/roadmap.png)
 
-**Phase 1: MVP** *(in progress)*
+**Phase 1: MVP** *(complete)*
 - [x] Discover and document the DGEG API
 - [x] Modular ETL in Python (requests, pandas)
 - [x] Daily, dated CSV snapshots
 - [x] PostgreSQL star schema with idempotent loads
 - [x] Station history with SCD Type 2
 - [x] Hosted PostgreSQL (Neon) + daily scheduling with GitHub Actions
-- [ ] Streamlit dashboard
+- [x] Public Streamlit dashboard with a read-only database user
 
 **Phase 2: Cloud storage**
 - [ ] Bronze layer in Azure Data Lake (untouched API responses)
@@ -211,6 +236,12 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ```
 ├── .github/workflows/
 │   └── daily.yml               # daily schedule on GitHub Actions
+├── .streamlit/
+│   ├── config.toml             # dashboard theme (colours, font)
+│   └── secrets.toml.example    # template for the dashboard's database settings
+├── dashboard/
+│   ├── app.py                  # Streamlit dashboard
+│   └── requirements.txt        # dashboard dependencies (separate from the pipeline's)
 ├── etl/
 │   ├── extract.py              # API requests and pagination
 │   ├── transform.py            # cleaning and parsing
@@ -271,14 +302,23 @@ python backfill.py    # optional: load any older CSVs from data/raw/
 
 Both are safe to rerun: rows that already exist are skipped.
 
-**4. Optional: schedule it on your own fork**
+**4. Optional: run the dashboard locally**
+
+```bash
+pip install -r dashboard/requirements.txt
+streamlit run dashboard/app.py
+```
+
+It reads `.streamlit/secrets.toml`: copy `.streamlit/secrets.toml.example` and fill it in, ideally with a read-only user created with [`sql/dashboard_role.sql`](sql/dashboard_role.sql).
+
+**5. Optional: schedule it on your own fork**
 
 Add four repository secrets under **Settings → Secrets and variables → Actions**: `PGHOST`, `PGUSER`, `PGPASSWORD` and `PGDATABASE`. The workflow in `.github/workflows/daily.yml` then runs every day, or on demand from the Actions tab.
 
 ## Tech stack
 
-**Now:** Python, requests, pandas, PostgreSQL, psycopg, SQL, Neon, GitHub Actions, Git/GitHub
-**Planned:** Streamlit, Azure Data Lake, Databricks, Spark, Delta Lake, Power BI
+**Now:** Python, requests, pandas, PostgreSQL, psycopg, SQL, Neon, GitHub Actions, Streamlit, Plotly, Streamlit Community Cloud, Git/GitHub
+**Planned:** Azure Data Lake, Databricks, Spark, Delta Lake, Power BI
 
 ## Author
 
