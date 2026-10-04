@@ -1,0 +1,67 @@
+# ============================================
+# DAILY PIPELINE: runs pipeline.py on GitHub's servers every day
+# ============================================
+# Created: 04/10/2026
+
+name: Daily fuel prices
+
+on:
+  # Every day at 19:17 UTC (20:17 Lisbon in summer, 19:17 in winter).
+  # Evening, so most stations have already published the day's prices.
+  # Minute 17 instead of 00: GitHub's runners are busiest on the hour, which delays scheduled jobs.
+  schedule:
+    - cron: "17 19 * * *"
+  # Adds a "Run workflow" button in the Actions tab, for manual runs and testing
+  workflow_dispatch:
+
+# The job only needs to read the code, nothing else
+permissions:
+  contents: read
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15  # stop a stuck run instead of letting it hang for hours
+
+    env:
+      # Database connection: secret values come from Settings > Secrets and variables > Actions.
+      # psycopg reads these environment variables automatically, exactly like the local .env
+      PGHOST: ${{ secrets.PGHOST }}
+      PGUSER: ${{ secrets.PGUSER }}
+      PGPASSWORD: ${{ secrets.PGPASSWORD }}
+      PGDATABASE: ${{ secrets.PGDATABASE }}
+      PGPORT: "5432"
+      PGSSLMODE: require
+      # GitHub's machines run on UTC; this makes date.today() use the Portuguese date
+      TZ: Europe/Lisbon
+
+    steps:
+      # 1. Download the repository's code onto the runner
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      # 2. Install the same Python version used locally (pip cache speeds up later runs)
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      # 3. Install the project's dependencies
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 4. Run the ETL: extract -> transform -> load (raw CSV + Neon)
+      - name: Run pipeline
+        run: python pipeline.py
+
+      # 5. Keep the raw CSV: the runner is wiped after the job, so upload it as an artifact.
+      #    "always()" uploads it even if the database load failed, so the raw data isn't lost.
+      - name: Upload raw snapshot
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: raw-snapshot-${{ github.run_id }}
+          path: data/raw/*.csv
+          retention-days: 90
+          if-no-files-found: warn
