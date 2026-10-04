@@ -54,7 +54,7 @@ def extract():
         # Add this page's records to the total list
         # ("extend" instead of "append" keeps it a flat list of records)
         registos_pagina = data["resultado"]
-        todos_registos.extend(registos_pagina)
+        todos_registos.extend(registos_pagina)  # Elaborate more on this!
 
         # "Quantidade" was confirmed by inspection to hold the grand total,
         # repeated identically on every record
