@@ -13,6 +13,6 @@ data/
 # VS Code workspace settings: editor-specific, not part of the project
 *.code-workspace
 
-# Credentials: database passwords stay on this machine
-.env
-.env.local
+# all environment files contain credentials, except the template
+.env*
+!.env.example
