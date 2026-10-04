@@ -10,7 +10,7 @@ Portugal's Directorate-General for Energy and Geology (DGEG) publishes current f
 
 This pipeline takes a snapshot every day and stores it, turning a "right now" view into a historical dataset. That makes it possible to answer questions the source can't, such as how prices evolve by brand, region or station over time.
 
-I built it as a portfolio project while moving from mechanical engineering into data engineering, to practise the full lifecycle of a pipeline: data discovery, extraction, transformation, storage, modelling, scheduling and visualisation.
+I built it as a portfolio project while moving from mechanical engineering into data engineering, to practice the full lifecycle of a pipeline: data discovery, extraction, transformation, storage, modelling, scheduling and visualisation.
 
 ## Data source
 
@@ -136,5 +136,5 @@ The output appears in `data/raw/`.
 
 ## Author
 
-**André Francisco**: mechanical engineer (MSc, Instituto Superior Técnico) moving into data engineering.
-[LinkedIn](https://www.linkedin.com/in/your-profile)
+**André Francisco**: Mechanical engineer (MSc, Instituto Superior Técnico) moving into data engineering.
+[LinkedIn](https://www.linkedin.com/in/andremffrancisco)
