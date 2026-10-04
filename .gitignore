@@ -12,3 +12,6 @@ data/
 
 # VS Code workspace settings: editor-specific, not part of the project
 *.code-workspace
+
+# Credentials: database passwords stay on this machine
+.env
