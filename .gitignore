@@ -9,3 +9,8 @@ __pycache__/
 
 # pipeline output: data snapshots don't belong in the code repo
 data/
+
+# Documents updated 
+docs/
+# VS Code workspace settings: editor-specific, not part of the project
+*.code-workspace
