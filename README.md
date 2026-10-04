@@ -90,14 +90,31 @@ A **star schema** in PostgreSQL, defined in [`sql/schema.sql`](sql/schema.sql):
 
 | Table | One row = | Key |
 |---|---|---|
-| `fact_precos` | one station × fuel × snapshot day | (`data_key`, `posto_id`, `combustivel_id`) |
-| `dim_postos` | one station | DGEG station `Id` |
+| `fact_precos` | one station × fuel × snapshot day | (`data_key`, `posto_sk`, `combustivel_id`) |
+| `dim_postos` | one **version** of a station (SCD Type 2) | generated `posto_sk`; DGEG's `Id` kept as `posto_id` |
 | `dim_combustivel` | one fuel type | generated ID |
 | `dim_data` | one calendar day | integer date, e.g. `20261004` |
 
 `fact_precos` is a **periodic snapshot fact table**: every station's price is recorded every day, even when it hasn't changed, so "what was the price on day X?" is a simple lookup.
 
 The day's rows are bulk-copied (`COPY`) into the staging table, then [`sql/load_from_staging.sql`](sql/load_from_staging.sql) loads the dimensions first and the fact table second.
+
+### Station history: SCD Type 2
+
+Stations change: a GALP becomes a PRIO, a station is renamed or moves. `dim_postos` is a **slowly changing dimension (Type 2)**: instead of overwriting a station's details, it closes the old row and adds a new **version**, so every price keeps the details that were true on its day.
+
+| posto_sk | posto_id | marca | valido_de | valido_ate | atual |
+|---|---|---|---|---|---|
+| 1 | 94625 | GALP | 2026-09-27 | 2026-10-03 | false |
+| 3 | 94625 | PRIO | 2026-10-04 | 9999-12-31 | true |
+
+*(illustrative example)*
+
+- **Surrogate and natural keys.** `posto_sk` is generated, one per version, and is what the fact table points to. `posto_id` is DGEG's own station `Id`, shared by all versions of a station.
+- **Change detection.** Each run compares the incoming details with the current version, column by column, using `IS DISTINCT FROM` so that missing values (NULL) compare as equal instead of triggering false changes.
+- **Point-in-time lookup.** Each price is linked to the version valid on its snapshot day: `snapshot_date BETWEEN valido_de AND valido_ate`.
+- **Enforced in the database.** A partial unique index allows at most one current version (`atual`) per station.
+- **Known limits.** Snapshots must be loaded in date order (daily runs are; `backfill.py` sorts its files), and a change is dated to the first snapshot that shows it, so precision is one day.
 
 ### Design decisions
 
@@ -106,19 +123,18 @@ The day's rows are bulk-copied (`COPY`) into the staging table, then [`sql/load_
 - **Dimensions before facts.** Foreign keys guarantee every price points to an existing station, fuel and date.
 - **Two dates per price.** `data_key` is when the pipeline captured the price; `data_atualizacao` is when the station last changed it. An old `data_atualizacao` flags a possibly stale price.
 - **Exact prices.** Prices are `NUMERIC(6,3)`, not floating point, so values are stored exactly.
-- **Station changes overwrite (SCD Type 1).** `dim_postos` keeps the latest details of each station, plus `primeira_vez` / `ultima_vez`, the first and latest day it appeared. A station whose `ultima_vez` stops advancing has probably closed.
 - **Append-only bronze layer.** Each run adds a new dated CSV and never edits old ones.
 
 ### Example query
 
-Average simple diesel price per district, on the latest day loaded:
+Average simple diesel price per district, on the latest day loaded, written against the star schema:
 
 ```sql
 SELECT p.distrito,
        ROUND(AVG(f.preco), 3) AS preco_medio,
        COUNT(*)               AS postos
 FROM fact_precos f
-JOIN dim_postos      p USING (posto_id)
+JOIN dim_postos      p USING (posto_sk)
 JOIN dim_combustivel c USING (combustivel_id)
 WHERE c.nome = 'Gasóleo simples'
   AND f.data_key = (SELECT MAX(data_key) FROM fact_precos)
@@ -126,9 +142,21 @@ GROUP BY p.distrito
 ORDER BY preco_medio;
 ```
 
-### Text encoding
+The same question through the view [`vw_precos`](sql/views.sql), which joins the star schema into one readable table:
 
-All files and tables use **UTF-8**, so Portuguese characters (`ç`, `ã`, `ó`...) are stored exactly as DGEG sends them. Excel on Windows doesn't assume UTF-8 when a CSV is double-clicked and may show `Ã§` instead of `ç`. The data is correct: open the file with **Data → From Text/CSV** and choose **65001: Unicode (UTF-8)** as the file origin.
+```sql
+SELECT distrito, ROUND(AVG(preco), 3) AS preco_medio, COUNT(*) AS postos
+FROM vw_precos
+WHERE combustivel = 'Gasóleo simples'
+  AND data = (SELECT MAX(data) FROM vw_precos)
+GROUP BY distrito
+ORDER BY preco_medio;
+```
+
+### Data quality notes
+
+- **Stale prices.** `data_atualizacao` shows that a handful of prices haven't been changed by their station in over a year (16 of 13,627 rows on 2026-10-04, the oldest from August 2024). They are kept in the warehouse exactly as DGEG reports them; deciding what is too old to trust is left to the analysis layer.
+- **Text encoding.** All files and tables use **UTF-8**, so Portuguese characters (`ç`, `ã`, `ó`...) are stored exactly as DGEG sends them. Excel on Windows doesn't assume UTF-8 when a CSV is double-clicked and may show `Ã§` instead of `ç`. The data is correct: open the file with **Data → From Text/CSV** and choose **65001: Unicode (UTF-8)** as the file origin.
 
 ## Roadmap
 
@@ -139,6 +167,7 @@ All files and tables use **UTF-8**, so Portuguese characters (`ç`, `ã`, `ó`..
 - [x] Modular ETL in Python (requests, pandas)
 - [x] Daily, dated CSV snapshots
 - [x] PostgreSQL star schema with idempotent loads
+- [x] Station history with SCD Type 2
 - [x] Hosted PostgreSQL (Neon) + daily scheduling with GitHub Actions
 - [ ] Streamlit dashboard
 
@@ -163,7 +192,9 @@ All files and tables use **UTF-8**, so Portuguese characters (`ç`, `ã`, `ó`..
 │   └── load.py                 # bronze CSV + PostgreSQL load
 ├── sql/
 │   ├── schema.sql              # star schema: tables, keys, constraints
-│   └── load_from_staging.sql   # staging → dimensions → fact table
+│   ├── load_from_staging.sql   # staging → dimensions (SCD Type 2) → fact table
+│   ├── views.sql               # vw_precos: star schema joined for reading
+│   └── dashboard_role.sql      # permissions for a read-only dashboard user
 ├── pipeline.py                 # runs the full ETL
 ├── backfill.py                 # loads existing raw CSVs into PostgreSQL
 ├── notebooks/                  # initial API exploration
@@ -201,6 +232,7 @@ Use a local PostgreSQL or a hosted one such as Neon. Create a database, then the
 ```bash
 psql -U postgres -c "CREATE DATABASE fuel_prices ENCODING 'UTF8';"   # local only
 psql "<your connection string>" -f sql/schema.sql
+psql "<your connection string>" -f sql/views.sql
 ```
 
 Copy `.env.example` to `.env` and fill in your connection settings. For a hosted database, include `PGSSLMODE=require`.
