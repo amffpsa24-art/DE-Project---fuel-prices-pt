@@ -153,6 +153,31 @@ GROUP BY distrito
 ORDER BY preco_medio;
 ```
 
+Both queries return the same result. For the snapshot of 2026-10-04:
+
+| distrito | preco_medio (€/L) | postos |
+|---|---:|---:|
+| Braga | 2.226 | 240 |
+| Aveiro | 2.227 | 232 |
+| Leiria | 2.230 | 211 |
+| Santarém | 2.231 | 205 |
+| Castelo Branco | 2.236 | 79 |
+| Viseu | 2.237 | 147 |
+| Porto | 2.240 | 408 |
+| Coimbra | 2.243 | 145 |
+| Guarda | 2.245 | 92 |
+| Viana do Castelo | 2.245 | 65 |
+| Setúbal | 2.248 | 175 |
+| Faro | 2.254 | 172 |
+| Portalegre | 2.254 | 46 |
+| Évora | 2.256 | 74 |
+| Vila Real | 2.258 | 83 |
+| Beja | 2.258 | 78 |
+| Lisboa | 2.260 | 343 |
+| Bragança | 2.262 | 72 |
+
+The gap between the cheapest district (Braga) and the most expensive (Bragança) is 3.6 cents per litre, about 1.80 € on a 50-litre tank. Districts with equal averages may appear in either order.
+
 ### Data quality notes
 
 - **Stale prices.** `data_atualizacao` shows that a handful of prices haven't been changed by their station in over a year (16 of 13,627 rows on 2026-10-04, the oldest from August 2024). They are kept in the warehouse exactly as DGEG reports them; deciding what is too old to trust is left to the analysis layer.
