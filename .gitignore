@@ -16,3 +16,6 @@ data/
 # all environment files contain credentials, except the template
 .env*
 !.env.example
+
+# Streamlit secrets: contains the dashboard's database password
+.streamlit/secrets.toml
