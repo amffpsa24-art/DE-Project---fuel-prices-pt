@@ -101,29 +101,30 @@ WHERE c.nome = 'Gasóleo simples'
 GROUP BY p.distrito
 ORDER BY preco_medio;
 ```
-OUTPUT
-distrito     | preco_medio | postos                                          
-------------------+-------------+--------
- Braga            |       2.226 |    240
- Aveiro           |       2.227 |    232
- Leiria           |       2.230 |    211
- Santarém         |       2.231 |    205
- Castelo Branco   |       2.237 |     79
- Viseu            |       2.238 |    147
- Porto            |       2.240 |    408
- Coimbra          |       2.243 |    145
- Guarda           |       2.245 |     92
- Viana do Castelo |       2.246 |     65
- Setúbal          |       2.248 |    175
- Faro             |       2.254 |    172
- Portalegre       |       2.254 |     46
- Évora            |       2.257 |     74
- Beja             |       2.258 |     78
- Vila Real        |       2.258 |     83                                          
- Lisboa           |       2.260 |    343                                          
- Bragança         |       2.262 |     72         
 
- 
+Result for 4 October 2026 (prices in €/litre):
+
+| distrito | preco_medio | postos |
+|---|--:|--:|
+| Braga | 2.226 | 240 |
+| Aveiro | 2.227 | 232 |
+| Leiria | 2.230 | 211 |
+| Santarém | 2.231 | 205 |
+| Castelo Branco | 2.237 | 79 |
+| Viseu | 2.238 | 147 |
+| Porto | 2.240 | 408 |
+| Coimbra | 2.243 | 145 |
+| Guarda | 2.245 | 92 |
+| Viana do Castelo | 2.246 | 65 |
+| Setúbal | 2.248 | 175 |
+| Faro | 2.254 | 172 |
+| Portalegre | 2.254 | 46 |
+| Évora | 2.257 | 74 |
+| Beja | 2.258 | 78 |
+| Vila Real | 2.258 | 83 |
+| Lisboa | 2.260 | 343 |
+| Bragança | 2.262 | 72 |
+
 ## Roadmap
 
 ![Roadmap](docs/images/roadmap.png)
