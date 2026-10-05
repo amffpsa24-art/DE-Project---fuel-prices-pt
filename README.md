@@ -1,6 +1,7 @@
 # Fuel Prices PT
 
-[![Open the live dashboard](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fuel-prices-pt.streamlit.app/) (docs/images/dashboard.png)
+[![Open the live dashboard](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fuel-prices-pt.streamlit.app/) 
+![Image of Dashboard Streamlit](docs/images/dashboard.png)
 
 **Live dashboard: [fuel-prices-pt.streamlit.app](https://fuel-prices-pt.streamlit.app/)**
 
