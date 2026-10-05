@@ -1,13 +1,11 @@
-# ============================================
 # DAILY PIPELINE: runs pipeline.py on GitHub's servers every day
-# ============================================
 # Created: 04/10/2026
 
 name: Daily fuel prices
 
 on:
-  # Every day at 19:17 UTC (20:17 Lisbon in summer, 19:17 in winter).
-  # Evening, so most stations have already published the day's prices.
+    # Every day at 19:17 UTC (20:17 Lisbon in summer, 19:17 in winter).
+    # Evening, so most stations have already published the day's prices.
   # Minute 17 instead of 00: GitHub's runners are busiest on the hour, which delays scheduled jobs.
   schedule:
     - cron: "17 19 * * *"
