@@ -22,4 +22,4 @@ data/
 
 # ignore notes document:
 notes/
-notebooks/dgeg_client.ipynb
+notebooks/dgeg_client.ipynb/

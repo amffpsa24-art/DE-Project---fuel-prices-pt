@@ -255,7 +255,6 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ├── pipeline.py                 # runs the full ETL
 ├── backfill.py                 # loads existing raw CSVs into PostgreSQL
 ├── notebooks/                  # initial API exploration
-├── notes/                      # API discovery notes and work logs
 ├── docs/images/                # diagrams
 ├── .env.example                # template for database settings
 └── requirements.txt
