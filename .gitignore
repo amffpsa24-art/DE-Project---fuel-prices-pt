@@ -19,3 +19,7 @@ data/
 
 # Streamlit secrets: contains the dashboard's database password
 .streamlit/secrets.toml
+
+# ignore notes document:
+notes/
+notebooks/dgeg_client.ipynb
