@@ -3,6 +3,8 @@
 [![Open the live dashboard](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fuel-prices-pt.streamlit.app/) 
 ![Image of Dashboard Streamlit](docs/images/dashboard.png)
 
+[![CI](https://github.com/amffpsa24-art/DE-Project---fuel-prices-pt/actions/workflows/ci.yml/badge.svg)](https://github.com/amffpsa24-art/DE-Project---fuel-prices-pt/actions/workflows/ci.yml)
+
 **Live dashboard: [fuel-prices-pt.streamlit.app](https://fuel-prices-pt.streamlit.app/)**
 
 A daily ETL pipeline that collects the price of every fuel at every petrol station in Portugal and models it as a star schema in a hosted PostgreSQL database, building a price history that the official source does not keep. It runs automatically every day on GitHub Actions, and a public Streamlit dashboard reads the warehouse.
