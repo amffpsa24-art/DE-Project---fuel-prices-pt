@@ -1,0 +1,16 @@
+# Settings for the development tools (no packaging here)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]          # so tests can "import etl..." from the project root
+addopts = "-ra"             # summary of skipped tests at the end, with the reason
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+# Ruff's default rules (real errors: undefined names, unused imports, syntax problems),
+# plus import sorting (I) and common bug patterns (B)
+select = ["E4", "E7", "E9", "F", "I", "B"]

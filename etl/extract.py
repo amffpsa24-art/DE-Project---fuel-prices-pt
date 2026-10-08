@@ -2,8 +2,8 @@
 # Created: 27/09/2026
 
 import time
-import requests
 
+import requests
 
 BASE_URL = "https://precoscombustiveis.dgeg.gov.pt/api/PrecoComb/PesquisarPostos"
 

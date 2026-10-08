@@ -1,0 +1,4 @@
+# Everything the pipeline needs, plus the tools for testing and code checks
+-r requirements.txt
+pytest
+ruff
