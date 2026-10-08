@@ -1,25 +1,27 @@
-# Main ETL pipeline
+# PIPELINE: entry point that runs the full ETL in sequence
 # Created: 27/09/2026
-# Run from the project root with: python pipeline.py
+# Usage (from the project root, with .venv active):  python pipeline.py
 
 from etl.extract import extract
-from etl.transform import transform
 from etl.load import load
+from etl.transform import transform
 
 
 def run():
-    # Extract data from the DGEG API
+    # 1. Get the raw records from the DGEG API
     registos = extract()
     print(f"Extract complete: {len(registos)} records\n")
 
-    # Transform the extracted data
+    # 2. Clean them into a DataFrame
     df = transform(registos)
     print(f"Transform complete: {df.shape[0]} rows, {df.shape[1]} columns\n")
 
-    # Load the transformed data
+    # 3. Save the result to disk
     load(df)
     print("Pipeline finished.")
 
-# Only runs when this file is executed directly
+
+# Only runs when this file is executed directly ("python pipeline.py"),
+# not when another file imports it
 if __name__ == "__main__":
     run()

@@ -22,4 +22,16 @@ data/
 
 # ignore notes document:
 notes/
-notebooks/dgeg_client.ipynb/
+# Ignore everything inside notebooks
+notebooks/*
+
+# Keep the data folder
+!notebooks/data/
+
+# Ignore everything inside data
+notebooks/data/*
+# Keep this specific CSV
+!notebooks/data/fuel_prices_raw.csv
+
+.pytest_cache/
+.ruff_cache/
