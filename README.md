@@ -1,11 +1,10 @@
 # Fuel Prices PT
 
-[![Open the live dashboard](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fuel-prices-pt.streamlit.app/) 
-![Image of Dashboard Streamlit](docs/images/dashboard.png)
-
-[![CI](https://github.com/amffpsa24-art/DE-Project---fuel-prices-pt/actions/workflows/ci.yml/badge.svg)](https://github.com/amffpsa24-art/DE-Project---fuel-prices-pt/actions/workflows/ci.yml)
+[![Open the live dashboard](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fuel-prices-pt.streamlit.app/) [![CI](https://github.com/amffpsa24-art/DE-Project---fuel-prices-pt/actions/workflows/ci.yml/badge.svg)](https://github.com/amffpsa24-art/DE-Project---fuel-prices-pt/actions/workflows/ci.yml)
 
 **Live dashboard: [fuel-prices-pt.streamlit.app](https://fuel-prices-pt.streamlit.app/)**
+
+![Fuel Prices PT dashboard: map of every station coloured by price, with the cheapest stations alongside](docs/images/dashboard.png)
 
 A daily ETL pipeline that collects the price of every fuel at every petrol station in Portugal and models it as a star schema in a hosted PostgreSQL database, building a price history that the official source does not keep. It runs automatically every day on GitHub Actions, and a public Streamlit dashboard reads the warehouse.
 
@@ -47,6 +46,7 @@ The pipeline follows an **extract → transform → load** structure, with each 
 | Load | [`etl/load.py`](etl/load.py) | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
 | Orchestration | [`pipeline.py`](pipeline.py) | Runs the three steps in sequence |
 | Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | Runs the pipeline every day on GitHub Actions |
+| Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lints the code and runs the tests on every push |
 | Dashboard | [`dashboard/app.py`](dashboard/app.py) | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
 
 Example run:
@@ -89,6 +89,30 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 - **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV is uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step fails, so the raw data is never lost to a load error.
 - **Correct dates:** the job runs with the `Europe/Lisbon` time zone, so each snapshot gets the Portuguese date.
 - **Safe reruns:** because loads are idempotent, a retried or manual run on the same day never duplicates data.
+
+## Testing
+
+Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 22 tests.
+
+| Tests | What they check |
+|---|---|
+| [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, the transform on a real API sample |
+| [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, fails on an HTTP error. The tests never call DGEG. |
+| [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, and a failed load leaving nothing behind |
+
+- **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
+- **Testing the tests.** To check the tests catch real bugs, I broke the loading SQL on purpose. Replacing `IS DISTINCT FROM` with `<>` still passed every test at first: in SQL, a comparison with NULL gives "unknown", so `<>` silently misses changes such as coordinates added to a station that had none. I added a test for that case, and it now fails as soon as the comparison is broken.
+
+**Running the tests locally**
+
+```bash
+pip install -r requirements-dev.txt
+psql -U postgres -c "CREATE DATABASE fuel_prices_test ENCODING 'UTF8';"
+ruff check .
+pytest -v
+```
+
+Without a test database, the database tests are skipped with a message and the others still run. To use a different database, set `TEST_DATABASE_URL`.
 
 ## Dashboard
 
@@ -224,6 +248,11 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 - [x] Hosted PostgreSQL (Neon) + daily scheduling with GitHub Actions
 - [x] Public Streamlit dashboard with a read-only database user
 
+**Production readiness** *(in progress)*
+- [x] Unit and database tests (pytest) with CI on every push
+- [ ] Data quality checks that stop a bad load (volume, schema, price ranges)
+- [ ] Run log table, retries and structured logging
+
 **Phase 2: Cloud storage**
 - [ ] Bronze layer in Azure Data Lake (untouched API responses)
 - [ ] Explicit bronze / silver / gold layers
@@ -238,7 +267,8 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 
 ```
 ├── .github/workflows/
-│   └── daily.yml               # daily schedule on GitHub Actions
+│   ├── daily.yml               # daily schedule on GitHub Actions
+│   └── ci.yml                  # lint + tests on every push
 ├── .streamlit/
 │   ├── config.toml             # dashboard theme (colours, font)
 │   └── secrets.toml.example    # template for the dashboard's database settings
@@ -254,12 +284,16 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 │   ├── load_from_staging.sql   # staging → dimensions (SCD Type 2) → fact table
 │   ├── views.sql               # vw_precos: star schema joined for reading
 │   └── dashboard_role.sql      # permissions for a read-only dashboard user
+├── tests/                      # unit tests + database tests (pytest)
 ├── pipeline.py                 # runs the full ETL
 ├── backfill.py                 # loads existing raw CSVs into PostgreSQL
 ├── notebooks/                  # initial API exploration
-├── docs/images/                # diagrams
+├── notes/                      # API discovery notes and work logs
+├── docs/images/                # diagrams and dashboard screenshot
 ├── .env.example                # template for database settings
-└── requirements.txt
+├── pyproject.toml              # pytest and Ruff settings
+├── requirements.txt            # pipeline dependencies
+└── requirements-dev.txt        # pipeline dependencies + pytest + Ruff
 ```
 
 The `data/` folder is created when the pipeline runs and is excluded from version control, as are all `.env` files except the template.
@@ -319,7 +353,7 @@ Add four repository secrets under **Settings → Secrets and variables → Actio
 
 ## Tech stack
 
-**Now:** Python, requests, pandas, PostgreSQL, psycopg, SQL, Neon, GitHub Actions, Streamlit, Plotly, Streamlit Community Cloud, Git/GitHub
+**Now:** Python, requests, pandas, PostgreSQL, psycopg, SQL, Neon, GitHub Actions, Streamlit, Plotly, Streamlit Community Cloud, pytest, Ruff, Git/GitHub
 **Planned:** Azure Data Lake, Databricks, Spark, Delta Lake, Power BI
 
 ## Author
