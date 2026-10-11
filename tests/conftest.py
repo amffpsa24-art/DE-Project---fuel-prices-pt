@@ -34,23 +34,29 @@ def api_page():
     return json.loads((FIXTURES / "api_page.json").read_text(encoding="utf-8"))
 
 
-@pytest.fixture
-def db():
-    """
-    A test database with a fresh, empty star schema for every test.
-    Returns the connection string to pass to load_postgres(..., conninfo=db).
-    """
+@pytest.fixture(scope="session")
+def test_database_url():
+    """Checks once per run that the test database is reachable; if not, every database test is skipped at once."""
     # Safety net: refuse to wipe anything that doesn't look like a test database
     dbname = psycopg.conninfo.conninfo_to_dict(TEST_DATABASE_URL).get("dbname", "")
     if not dbname.endswith("_test"):
         pytest.exit(f"TEST_DATABASE_URL must point to a database ending in '_test' (got '{dbname}')", returncode=1)
 
     try:
-        conn = psycopg.connect(TEST_DATABASE_URL, autocommit=True)
+        # connect_timeout: skip quickly instead of hanging when no database is running
+        psycopg.connect(TEST_DATABASE_URL, connect_timeout=3).close()
     except psycopg.OperationalError as e:
         pytest.skip(f"No test database available ({e.__class__.__name__}). See README: Running the tests.")
+    return TEST_DATABASE_URL
 
-    with conn:
+
+@pytest.fixture
+def db(test_database_url):
+    """
+    A test database with a fresh, empty star schema for every test.
+    Returns the connection string to pass to load_postgres(..., conninfo=db).
+    """
+    with psycopg.connect(test_database_url, autocommit=True) as conn:
         conn.execute("DROP VIEW IF EXISTS vw_precos")
         conn.execute("DROP TABLE IF EXISTS fact_precos, dim_postos, dim_combustivel, dim_data, stg_precos CASCADE")
         conn.execute((SQL_DIR / "schema.sql").read_text(encoding="utf-8"))

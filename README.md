@@ -112,7 +112,9 @@ ruff check .
 pytest -v
 ```
 
-Without a test database, the database tests are skipped with a message and the others still run. To use a different database, set `TEST_DATABASE_URL`.
+Without a test database, the database tests are skipped with a message and the others still run. The connection is tried once per run with a 3-second timeout, so a missing database skips them in seconds instead of hanging.
+
+To use a different database, set `TEST_DATABASE_URL`. It doesn't have to be local: a hosted test database (for example a separate Neon database) works too, as long as its name ends in `_test`.
 
 ## Dashboard
 
@@ -266,6 +268,8 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ## Project structure
 
 ```
+├── .devcontainer/
+│   └── devcontainer.json       # GitHub Codespaces setup: opens with the dashboard running
 ├── .github/workflows/
 │   ├── daily.yml               # daily schedule on GitHub Actions
 │   └── ci.yml                  # lint + tests on every push
