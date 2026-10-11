@@ -26,7 +26,7 @@ The DGEG website has no documented public API. I found the endpoint the site use
 GET https://precoscombustiveis.dgeg.gov.pt/api/PrecoComb/PesquisarPostos
 ```
 
-Key findings (full details in [`notes/api-discovery.md`](notes/api-discovery.md)):
+Key findings (full details, in Portuguese, in [`notes/api-discovery.md`](notes/api-discovery.md); the exploration itself is in [`notebooks/dgeg_client.ipynb`](notebooks/dgeg_client.ipynb)):
 
 - Each record is one **(station, fuel type)** pair, so a station selling 4 fuels appears 4 times, with its details repeated.
 - The `Quantidade` field holds the **total number of records** for the query (repeated on every row), which is what drives pagination.
@@ -269,7 +269,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 
 ```
 ├── .devcontainer/
-│   └── devcontainer.json       # GitHub Codespaces setup: opens with the dashboard running
+│   └── devcontainer.json       # GitHub Codespaces setup: Python 3.14 + all dependencies
 ├── .github/workflows/
 │   ├── daily.yml               # daily schedule on GitHub Actions
 │   └── ci.yml                  # lint + tests on every push
@@ -291,8 +291,8 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ├── tests/                      # unit tests + database tests (pytest)
 ├── pipeline.py                 # runs the full ETL
 ├── backfill.py                 # loads existing raw CSVs into PostgreSQL
-├── notebooks/                  # initial API exploration
-├── notes/                      # API discovery notes and work logs
+├── notebooks/                  # initial API exploration (dgeg_client.ipynb + a raw sample)
+├── notes/                      # API discovery notes (api-discovery.md)
 ├── docs/images/                # diagrams and dashboard screenshot
 ├── .env.example                # template for database settings
 ├── pyproject.toml              # pytest and Ruff settings
@@ -350,6 +350,8 @@ streamlit run dashboard/app.py
 ```
 
 It reads `.streamlit/secrets.toml`: copy `.streamlit/secrets.toml.example` and fill it in, ideally with a read-only user created with [`sql/dashboard_role.sql`](sql/dashboard_role.sql).
+
+In **GitHub Codespaces**, the dev container installs everything and creates `.streamlit/secrets.toml` from the template: fill it in, then run `streamlit run dashboard/app.py`.
 
 **5. Optional: schedule it on your own fork**
 

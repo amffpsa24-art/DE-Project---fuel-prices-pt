@@ -20,10 +20,13 @@ data/
 # Streamlit secrets: contains the dashboard's database password
 .streamlit/secrets.toml
 
-# ignore notes document:
-notes/
-# Ignore everything inside notebooks
+# Notes: work logs stay private, the API discovery note is public
+notes/*
+!notes/api-discovery.md
+
+# Notebooks: only the API exploration notebook is public
 notebooks/*
+!notebooks/dgeg_client.ipynb
 
 # Keep the data folder
 !notebooks/data/
