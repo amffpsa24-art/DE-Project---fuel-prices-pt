@@ -1,6 +1,7 @@
 -- Star schema for the fuel prices warehouse
 -- Created: 04/10/2026
 -- Updated: 04/10/2026
+-- Updated: 11/10/2026 (pipeline_runs: one row per pipeline run, for monitoring)
 
 CREATE TABLE IF NOT EXISTS dim_data (
     data_key      INTEGER     PRIMARY KEY,
@@ -86,3 +87,24 @@ CREATE UNLOGGED TABLE IF NOT EXISTS stg_precos (
     preco            NUMERIC(6,3)     NOT NULL,
     data_atualizacao TIMESTAMP
 );
+
+-- Run log: one row per pipeline run, written OUTSIDE the load's transaction,
+-- so a failed load still leaves its "failed" row behind.
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    run_id         SERIAL      PRIMARY KEY,
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at    TIMESTAMPTZ,
+    snapshot_date  DATE        NOT NULL,
+    triggered_by   TEXT        NOT NULL CHECK (triggered_by IN ('schedule', 'backup', 'manual')),
+    status         TEXT        NOT NULL DEFAULT 'running'
+                               CHECK (status IN ('running', 'success', 'failed', 'skipped')),
+    rows_extracted INTEGER,
+    rows_loaded    INTEGER,
+    error          TEXT,
+    github_run_id  BIGINT      -- links the row to its GitHub Actions log
+);
+
+-- Fast answer to "has today already been loaded?"
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_sucesso
+ON pipeline_runs (snapshot_date)
+WHERE status = 'success';

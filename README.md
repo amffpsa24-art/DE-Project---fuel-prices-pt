@@ -44,7 +44,7 @@ The pipeline follows an **extract → transform → load** structure, with each 
 | Extract | [`etl/extract.py`](etl/extract.py) | Paginated requests to the DGEG API until every record is collected |
 | Transform | [`etl/transform.py`](etl/transform.py) | Converts the JSON records into a pandas DataFrame and parses prices into numbers |
 | Load | [`etl/load.py`](etl/load.py) | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
-| Orchestration | [`pipeline.py`](pipeline.py) | Runs the three steps in sequence |
+| Orchestration | [`pipeline.py`](pipeline.py) | Runs the three steps in sequence and records the run in `pipeline_runs` |
 | Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | Runs the pipeline every day on GitHub Actions |
 | Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lints the code and runs the tests on every push |
 | Dashboard | [`dashboard/app.py`](dashboard/app.py) | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
@@ -84,7 +84,8 @@ Phase 1 is a lightweight version of the pattern: the bronze CSV already includes
 
 The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflows/daily.yml)) and writes to a **hosted PostgreSQL database on [Neon](https://neon.com)**, so it runs without any local machine switched on.
 
-- **Schedule:** every day at 19:17 UTC, in the evening so most stations have published the day's prices. It can also be started manually from the Actions tab.
+- **Schedule:** a main run every day at 13:17 UTC and a backup at 16:17 UTC. GitHub can start scheduled jobs hours late (the original 19:17 runs started 3–5 hours late, some after midnight in Lisbon), so both run early enough to finish the same day. The backup checks the run log and stops at once if the day is already loaded, so DGEG isn't called for nothing. The first successful snapshot of the day wins: if prices change between the two runs, the backup doesn't replace them. Runs can also be started manually from the Actions tab.
+- **Run log:** every run adds a row to `pipeline_runs`: start and end time, the snapshot date, who started it (schedule, backup or manual), status (success, failed or skipped), rows extracted and loaded, the error message, and the GitHub Actions run ID. The row is written on its own connection, outside the load's transaction, so a failed load still leaves a "failed" row instead of disappearing with the rollback.
 - **Credentials:** the database connection comes from **GitHub Secrets**, exposed to the job as environment variables. No password is stored in the code or the repository.
 - **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV is uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step fails, so the raw data is never lost to a load error.
 - **Correct dates:** the job runs with the `Europe/Lisbon` time zone, so each snapshot gets the Portuguese date.
@@ -92,13 +93,14 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 
 ## Testing
 
-Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 22 tests.
+Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 28 tests.
 
 | Tests | What they check |
 |---|---|
 | [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, the transform on a real API sample |
 | [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, fails on an HTTP error. The tests never call DGEG. |
 | [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, and a failed load leaving nothing behind |
+| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead |
 
 - **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
 - **Testing the tests.** To check the tests catch real bugs, I broke the loading SQL on purpose. Replacing `IS DISTINCT FROM` with `<>` still passed every test at first: in SQL, a comparison with NULL gives "unknown", so `<>` silently misses changes such as coordinates added to a station that had none. I added a test for that case, and it now fails as soon as the comparison is broken.
@@ -235,6 +237,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ### Data quality notes
 
 - **Stale prices.** `data_atualizacao` shows that a handful of prices haven't been changed by their station in over a year (16 of 13,627 rows on 2026-10-04, the oldest from August 2024). They are kept in the warehouse exactly as DGEG reports them; deciding what is too old to trust is left to the analysis layer.
+- **Data gaps.** There is no snapshot for **2026-10-05**: GitHub started that day's scheduled run after midnight in Lisbon, so it was labelled 2026-10-06. DGEG keeps no history, so the day can't be recovered. Until 2026-10-11, capture times also varied between about 23:20 and 01:50 Lisbon time for the same reason. The data is left as captured: each snapshot holds the prices in force when it was taken. The earlier schedule and the run log (see [Automation](#automation)) now prevent and expose this. The days before 2026-10-04, apart from a first manual snapshot on 2026-09-27, predate the daily schedule.
 - **Text encoding.** All files and tables use **UTF-8**, so Portuguese characters (`ç`, `ã`, `ó`...) are stored exactly as DGEG sends them. Excel on Windows doesn't assume UTF-8 when a CSV is double-clicked and may show `Ã§` instead of `ç`. The data is correct: open the file with **Data → From Text/CSV** and choose **65001: Unicode (UTF-8)** as the file origin.
 
 ## Roadmap
@@ -253,7 +256,8 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 **Production readiness** *(in progress)*
 - [x] Unit and database tests (pytest) with CI on every push
 - [ ] Data quality checks that stop a bad load (volume, schema, price ranges)
-- [ ] Run log table, retries and structured logging
+- [x] Run log table (`pipeline_runs`) and a backup run that skips a day already loaded
+- [ ] Retries and structured logging
 
 **Phase 2: Cloud storage**
 - [ ] Bronze layer in Azure Data Lake (untouched API responses)
@@ -282,7 +286,8 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ├── etl/
 │   ├── extract.py              # API requests and pagination
 │   ├── transform.py            # cleaning and parsing
-│   └── load.py                 # bronze CSV + PostgreSQL load
+│   ├── load.py                 # bronze CSV + PostgreSQL load
+│   └── runs.py                 # run log (pipeline_runs), written outside the load's transaction
 ├── sql/
 │   ├── schema.sql              # star schema: tables, keys, constraints
 │   ├── load_from_staging.sql   # staging → dimensions (SCD Type 2) → fact table

@@ -69,7 +69,9 @@ def db(test_database_url):
     # autocommit: each statement is applied immediately (DROP/CREATE outside a transaction).
     with psycopg.connect(test_database_url, autocommit=True) as conn:
         conn.execute("DROP VIEW IF EXISTS vw_precos")
-        conn.execute("DROP TABLE IF EXISTS fact_precos, dim_postos, dim_combustivel, dim_data, stg_precos CASCADE")
+        conn.execute(
+            "DROP TABLE IF EXISTS fact_precos, dim_postos, dim_combustivel, dim_data, stg_precos, pipeline_runs CASCADE"
+        )
         # Same SQL files as production, so the tests check the real schema, not a copy of it
         conn.execute((SQL_DIR / "schema.sql").read_text(encoding="utf-8"))
         conn.execute((SQL_DIR / "views.sql").read_text(encoding="utf-8"))

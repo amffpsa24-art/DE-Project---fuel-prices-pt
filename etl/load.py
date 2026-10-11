@@ -1,6 +1,6 @@
-# ============================================
+
 # LOAD: saves the raw CSV snapshot, then loads PostgreSQL
-# ============================================
+
 # Created: 27/09/2026
 # Updated: 04/10/2026 (PostgreSQL star schema)
 # Updated: 07/10/2026 (optional connection string, so tests can use a separate database)
@@ -47,6 +47,18 @@ MAPA_COLUNAS = {
 }
 
 
+def resolver_conninfo(conninfo=None):
+    """
+    Returns the connection string to use. None means "the real database":
+    reads .env into environment variables (PGHOST, PGUSER, PGPASSWORD, ...), and
+    psycopg.connect() with an empty string picks them up automatically.
+    """
+    if conninfo is None:
+        load_dotenv(PROJECT_ROOT / ".env")
+        conninfo = ""
+    return conninfo
+
+
 def save_raw_csv(df, snapshot_date):
     """
     Raw layer: saves the DataFrame exactly as transformed,
@@ -85,12 +97,7 @@ def load_postgres(df, snapshot_date, conninfo=None):
     come from .env (locally) or the environment (GitHub Actions). Tests pass
     their own, pointing to a separate test database.
     """
-    if conninfo is None:
-        # Reads .env into environment variables (PGHOST, PGUSER, PGPASSWORD, ...).
-        # psycopg.connect() with an empty string picks them up automatically.
-        load_dotenv(PROJECT_ROOT / ".env")
-        conninfo = ""
-
+    conninfo = resolver_conninfo(conninfo)
     linhas = preparar_linhas(df, snapshot_date)
     sql_load = SQL_LOAD_FROM_STAGING.read_text(encoding="utf-8")
 
@@ -118,15 +125,17 @@ def load_postgres(df, snapshot_date, conninfo=None):
             total_dia = cur.fetchone()[0]
 
     print(f"Loaded PostgreSQL: {total_dia} price rows for {snapshot_date.isoformat()}")
+    return total_dia
 
 
-def load(df, snapshot_date=None):
+def load(df, snapshot_date=None, conninfo=None):
     """
     Full load step: raw CSV first, then PostgreSQL.
     snapshot_date defaults to today; backfill.py passes older dates.
+    Returns the number of price rows stored for that day.
     """
     if snapshot_date is None:
         snapshot_date = date.today()
 
     save_raw_csv(df, snapshot_date)
-    load_postgres(df, snapshot_date)
+    return load_postgres(df, snapshot_date, conninfo)
