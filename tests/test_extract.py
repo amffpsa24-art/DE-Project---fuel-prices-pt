@@ -22,7 +22,8 @@ class FakeResponse:
     # Same behaviour as the real one: raise on 4xx/5xx, do nothing on success
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise requests.HTTPError(f"{self.status_code} error")
+            # response=self: like the real one, so extract() can tell 5xx (retry) from 4xx (fail at once)
+            raise requests.HTTPError(f"{self.status_code} error", response=self)
 
     # Same JSON shape as DGEG's answer
     def json(self):
@@ -40,11 +41,14 @@ def fake_api(monkeypatch):
 
     def fake_get(url, params=None, timeout=None):
         calls.append(dict(params))
-        return pages.pop(0)   # serve the next page
+        pagina = pages.pop(0)   # serve the next page
+        if isinstance(pagina, Exception):
+            raise pagina        # e.g. a dropped connection
+        return pagina
 
     # monkeypatch swaps these only during the test, and puts the originals back afterwards
     monkeypatch.setattr(extract_module.requests, "get", fake_get)
-    monkeypatch.setattr(extract_module.time, "sleep", lambda s: None)   # no 1-second waits in tests
+    monkeypatch.setattr(extract_module.time, "sleep", lambda s: None)   # no waits in tests (pauses, retries)
     return calls, pages
 
 
@@ -89,10 +93,30 @@ def test_extract_asks_for_all_fuels_and_no_other_filter(fake_api):
     assert p["idMarca"] == p["idDistrito"] == p["idsMunicipios"] == ""   # empty = no filter
 
 
-def test_extract_fails_loudly_when_the_api_returns_an_error(fake_api):
-    # If DGEG is down (503), the run must crash, not continue and load an empty day as if it were real
+def test_extract_fails_loudly_when_the_api_keeps_failing(fake_api):
+    # If DGEG stays down (503 on every attempt), the run must crash, not load an empty day as if it were real
     calls, pages = fake_api
-    pages += [FakeResponse([], status_code=503)]
+    pages += [FakeResponse([], status_code=503)] * 3
 
     with pytest.raises(requests.HTTPError):
         extract()
+    assert len(calls) == 3      # 1 attempt + 2 retries, then gives up
+
+
+def test_extract_retries_a_temporary_error(fake_api):
+    # A hiccup (503, then a dropped connection) shouldn't fail the day: the next attempt succeeds
+    calls, pages = fake_api
+    pages += [FakeResponse([], status_code=503), requests.ConnectionError("reset"), FakeResponse(records(2, total=2))]
+
+    assert len(extract()) == 2
+    assert [c["pagina"] for c in calls] == [1, 1, 1]   # the same page, asked three times
+
+
+def test_extract_does_not_retry_a_client_error(fake_api):
+    # 4xx means our request is wrong: retrying won't fix it, so fail at once
+    calls, pages = fake_api
+    pages += [FakeResponse([], status_code=400)]
+
+    with pytest.raises(requests.HTTPError):
+        extract()
+    assert len(calls) == 1

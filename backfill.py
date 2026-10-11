@@ -7,6 +7,7 @@
 # Safe to run any number of times: the load is idempotent,
 # so days already in the database are simply skipped.
 
+import logging
 from datetime import date
 
 import pandas as pd
@@ -37,4 +38,6 @@ def run():
 
 
 if __name__ == "__main__":
+    # load_postgres reports through logging: show its messages too
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     run()

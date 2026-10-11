@@ -4,13 +4,16 @@
 # Created: 27/09/2026
 # Updated: 04/10/2026 (PostgreSQL star schema)
 # Updated: 07/10/2026 (optional connection string, so tests can use a separate database)
+# Updated: 11/10/2026 (logging; pipeline.py calls save_raw_csv and load_postgres itself, with checks in between)
 
-from datetime import date
+import logging
 from pathlib import Path
 
 import pandas as pd
 import psycopg
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 # Project root = the folder above etl/, so paths work no matter where Python is run from
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -69,7 +72,7 @@ def save_raw_csv(df, snapshot_date):
 
     # index=False: don't write pandas' internal row numbers as a column
     df.to_csv(caminho, index=False)
-    print(f"Saved {len(df)} rows to {caminho}")
+    log.info("Saved %d rows to %s", len(df), caminho)
     return caminho
 
 
@@ -112,7 +115,7 @@ def load_postgres(df, snapshot_date, conninfo=None):
             with cur.copy(f"COPY stg_precos ({colunas_sql}) FROM STDIN") as copy:
                 for linha in linhas:
                     copy.write_row(linha)
-            print(f"Staged {len(linhas)} rows in stg_precos")
+            log.info("Staged %d rows in stg_precos", len(linhas))
 
             # 3. Staging -> dimensions -> fact table
             cur.execute(sql_load)
@@ -124,18 +127,5 @@ def load_postgres(df, snapshot_date, conninfo=None):
             )
             total_dia = cur.fetchone()[0]
 
-    print(f"Loaded PostgreSQL: {total_dia} price rows for {snapshot_date.isoformat()}")
+    log.info("Loaded PostgreSQL: %d price rows for %s", total_dia, snapshot_date)
     return total_dia
-
-
-def load(df, snapshot_date=None, conninfo=None):
-    """
-    Full load step: raw CSV first, then PostgreSQL.
-    snapshot_date defaults to today; backfill.py passes older dates.
-    Returns the number of price rows stored for that day.
-    """
-    if snapshot_date is None:
-        snapshot_date = date.today()
-
-    save_raw_csv(df, snapshot_date)
-    return load_postgres(df, snapshot_date, conninfo)

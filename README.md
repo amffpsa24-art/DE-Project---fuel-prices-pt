@@ -41,27 +41,28 @@ The pipeline follows an **extract → transform → load** structure, with each 
 
 | Step | File | What it does |
 |---|---|---|
-| Extract | [`etl/extract.py`](etl/extract.py) | Paginated requests to the DGEG API until every record is collected |
+| Extract | [`etl/extract.py`](etl/extract.py) | Paginated requests to the DGEG API until every record is collected, retrying temporary errors |
 | Transform | [`etl/transform.py`](etl/transform.py) | Converts the JSON records into a pandas DataFrame and parses prices into numbers |
+| Quality checks | [`etl/quality.py`](etl/quality.py) | Stops a bad day before it reaches the database: volume, missing columns, empty required fields, price range, duplicates |
 | Load | [`etl/load.py`](etl/load.py) | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
-| Orchestration | [`pipeline.py`](pipeline.py) | Runs the three steps in sequence and records the run in `pipeline_runs` |
+| Orchestration | [`pipeline.py`](pipeline.py) | Runs the steps in sequence and records the run in `pipeline_runs` |
 | Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | Runs the pipeline every day on GitHub Actions |
 | Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lints the code and runs the tests on every push |
 | Dashboard | [`dashboard/app.py`](dashboard/app.py) | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
 
-Example run:
+Example run (each line also starts with a timestamp, omitted here):
 
 ```
-Page 1: 10000 records (accumulated: 10000 / 13627)
-Page 2: 3627 records (accumulated: 13627 / 13627)
-Extract complete: 13627 records
-
-Transform complete: 13627 rows, 16 columns
-
-Saved 13627 rows to data/raw/fuel_prices_2026-10-04.csv
-Staged 13627 rows in stg_precos
-Loaded PostgreSQL: 13627 price rows for 2026-10-04
-Pipeline finished.
+INFO    pipeline: Run 2 started (schedule) for 2026-10-11
+INFO    etl.extract: Page 1: 10000 records (total: 10000 / 13479)
+INFO    etl.extract: Page 2: 3479 records (total: 13479 / 13479)
+INFO    pipeline: Extract complete: 13479 records
+INFO    pipeline: Transform complete: 13479 rows, 16 columns
+INFO    etl.load: Saved 13479 rows to data/raw/fuel_prices_2026-10-11.csv
+INFO    etl.quality: Quality checks passed: 13479 rows
+INFO    etl.load: Staged 13479 rows in stg_precos
+INFO    etl.load: Loaded PostgreSQL: 13479 price rows for 2026-10-11
+INFO    pipeline: Run 2 finished: 13479 price rows loaded
 ```
 
 ## Medallion architecture
@@ -86,6 +87,9 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 
 - **Schedule:** a main run every day at 13:17 UTC and a backup at 16:17 UTC. GitHub can start scheduled jobs hours late (the original 19:17 runs started 3–5 hours late, some after midnight in Lisbon), so both run early enough to finish the same day. The backup checks the run log and stops at once if the day is already loaded, so DGEG isn't called for nothing. The first successful snapshot of the day wins: if prices change between the two runs, the backup doesn't replace them. Runs can also be started manually from the Actions tab.
 - **Run log:** every run adds a row to `pipeline_runs`: start and end time, the snapshot date, who started it (schedule, backup or manual), status (success, failed or skipped), rows extracted and loaded, the error message, and the GitHub Actions run ID. The row is written on its own connection, outside the load's transaction, so a failed load still leaves a "failed" row instead of disappearing with the rollback.
+- **Quality checks:** before the database is touched, the day's data must have 12,000–16,000 rows (recent days: about 13,500), every column the load uses, no empty station ID, name, fuel or price, every price between 0.50 and 5.00 €, and no duplicated station × fuel. Any failure stops the run with one message listing every problem, and the run is recorded as failed, so a partial or garbled day never reaches the warehouse. The raw CSV is still saved, to see what was wrong. The thresholds come from real snapshots and live at the top of [`etl/quality.py`](etl/quality.py).
+- **Retries:** a connection error, timeout or 5xx response from DGEG is retried twice, after 10 and 30 seconds. A 4xx response means the request itself is wrong, so it fails at once. If all attempts fail, the backup run tries again later.
+- **Logging:** every line has a timestamp, level and module (see the example above), so a GitHub Actions log shows when and where something happened.
 - **Credentials:** the database connection comes from **GitHub Secrets**, exposed to the job as environment variables. No password is stored in the code or the repository.
 - **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV is uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step fails, so the raw data is never lost to a load error.
 - **Correct dates:** the job runs with the `Europe/Lisbon` time zone, so each snapshot gets the Portuguese date.
@@ -93,14 +97,15 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 
 ## Testing
 
-Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 28 tests.
+Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 39 tests.
 
 | Tests | What they check |
 |---|---|
 | [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, the transform on a real API sample |
-| [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, fails on an HTTP error. The tests never call DGEG. |
+| [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, retries temporary errors, fails at once on a 4xx, gives up after 3 attempts. The tests never call DGEG. |
+| [`test_quality.py`](tests/test_quality.py) | The quality checks: a normal day passes; too few rows, an out-of-range price, an empty required field, a duplicate or a missing column each fail; all problems reported at once |
 | [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, and a failed load leaving nothing behind |
-| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead |
+| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database |
 
 - **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
 - **Testing the tests.** To check the tests catch real bugs, I broke the loading SQL on purpose. Replacing `IS DISTINCT FROM` with `<>` still passed every test at first: in SQL, a comparison with NULL gives "unknown", so `<>` silently misses changes such as coordinates added to a station that had none. I added a test for that case, and it now fails as soon as the comparison is broken.
@@ -255,9 +260,9 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 
 **Production readiness** *(in progress)*
 - [x] Unit and database tests (pytest) with CI on every push
-- [ ] Data quality checks that stop a bad load (volume, schema, price ranges)
+- [x] Data quality checks that stop a bad load (volume, schema, price ranges)
 - [x] Run log table (`pipeline_runs`) and a backup run that skips a day already loaded
-- [ ] Retries and structured logging
+- [x] Retries for temporary API errors, and logging with timestamps and levels
 
 **Phase 2: Cloud storage**
 - [ ] Bronze layer in Azure Data Lake (untouched API responses)
@@ -286,6 +291,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ├── etl/
 │   ├── extract.py              # API requests and pagination
 │   ├── transform.py            # cleaning and parsing
+│   ├── quality.py              # data quality checks that stop a bad load
 │   ├── load.py                 # bronze CSV + PostgreSQL load
 │   └── runs.py                 # run log (pipeline_runs), written outside the load's transaction
 ├── sql/

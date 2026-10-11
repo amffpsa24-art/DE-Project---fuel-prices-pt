@@ -9,7 +9,9 @@ import pytest
 import requests
 
 import etl.load as load_module
+import etl.quality as quality
 import pipeline
+from etl.quality import DataQualityError
 from tests.conftest import make_record, query
 
 
@@ -30,6 +32,7 @@ def fake_extract(monkeypatch, tmp_path):
     # pipeline did "from etl.extract import extract", so the name to replace lives in pipeline
     monkeypatch.setattr(pipeline, "extract", extract)
     monkeypatch.setattr(load_module, "PASTA_RAW", tmp_path)
+    monkeypatch.setattr(quality, "MIN_REGISTOS", 1)   # small samples instead of a full day's ~13,500 rows
     return estado
 
 
@@ -67,9 +70,12 @@ def test_a_manual_run_always_goes_ahead(db, fake_extract):
     assert query(db, "SELECT COUNT(*) FROM fact_precos")[0][0] == 2
 
 
-def test_a_failed_load_is_still_recorded_as_failed(db, fake_extract):
+def test_a_failed_load_is_still_recorded_as_failed(db, fake_extract, monkeypatch):
     # The key design point: the load's transaction rolls back, but the run log row survives,
-    # because it's written on a separate connection
+    # because it's written on a separate connection.
+    # The quality checks would catch a negative price first, so they're switched off here
+    # to make the database itself reject it (CHECK preco > 0) inside the transaction.
+    monkeypatch.setattr(pipeline, "verificar", lambda df: None)
     fake_extract["registos"] = [make_record(posto_id=1), make_record(posto_id=2, preco="-1,000 €")]
 
     with pytest.raises(psycopg.errors.CheckViolation):
@@ -99,3 +105,16 @@ def test_a_failed_run_does_not_count_as_loaded(db, fake_extract):
     pipeline.run("backup", conninfo=db)
 
     assert [r[:2] for r in runs_log(db)] == [("schedule", "failed"), ("backup", "success")]
+
+
+def test_a_day_failing_the_quality_checks_is_not_loaded(db, fake_extract, tmp_path):
+    # A price parsed as 11.64 stops the run before the database: nothing loaded, the run recorded as failed
+    fake_extract["registos"] = [make_record(posto_id=1), make_record(posto_id=2, preco="11,64 €")]
+
+    with pytest.raises(DataQualityError):
+        pipeline.run("schedule", conninfo=db)
+
+    assert runs_log(db) == [("schedule", "failed", 2, None, True, True)]
+    assert query(db, "SELECT COUNT(*) FROM fact_precos")[0][0] == 0
+    # The raw CSV is still saved, to see what was wrong
+    assert len(list(tmp_path.glob("fuel_prices_*.csv"))) == 1
