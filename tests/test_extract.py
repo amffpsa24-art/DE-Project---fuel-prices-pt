@@ -1,7 +1,7 @@
-# ============================================
+
 # Unit tests: pagination of the DGEG API, with a fake API (tests never call DGEG)
-# ============================================
 # Created: 07/10/2026
+# Why fake it: the real API changes every day, needs the internet, and shouldn't get extra traffic from tests.
 
 import pytest
 import requests
@@ -11,6 +11,7 @@ from etl.extract import extract
 from tests.conftest import make_record
 
 
+# A minimal copy of requests' response: only the three things extract() uses
 class FakeResponse:
     """Stands in for requests' response object."""
 
@@ -18,10 +19,12 @@ class FakeResponse:
         self._resultado = resultado
         self.status_code = status_code
 
+    # Same behaviour as the real one: raise on 4xx/5xx, do nothing on success
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.HTTPError(f"{self.status_code} error")
 
+    # Same JSON shape as DGEG's answer
     def json(self):
         return {"status": True, "mensagem": "sucesso", "resultado": self._resultado}
 
@@ -32,19 +35,22 @@ def fake_api(monkeypatch):
     Replaces requests.get with a function that serves pre-built pages, one per call,
     and records the parameters of every call. Also removes the pause between pages.
     """
+    # calls: what extract() asked for. pages: what the fake API answers, in order.
     calls, pages = [], []
 
     def fake_get(url, params=None, timeout=None):
         calls.append(dict(params))
-        return pages.pop(0)
+        return pages.pop(0)   # serve the next page
 
+    # monkeypatch swaps these only during the test, and puts the originals back afterwards
     monkeypatch.setattr(extract_module.requests, "get", fake_get)
-    monkeypatch.setattr(extract_module.time, "sleep", lambda s: None)
+    monkeypatch.setattr(extract_module.time, "sleep", lambda s: None)   # no 1-second waits in tests
     return calls, pages
 
 
 def records(n, total):
     """n API records whose 'Quantidade' (the grand total) is `total`."""
+    # The API repeats the grand total on every row; extract() uses it to know when to stop
     rs = [make_record(posto_id=i) for i in range(n)]
     for r in rs:
         r["Quantidade"] = total
@@ -52,6 +58,7 @@ def records(n, total):
 
 
 def test_extract_reads_every_page_until_the_total(fake_api):
+    # Total is 5, split over two pages (3 + 2): extract() must ask for both and then stop
     calls, pages = fake_api
     pages += [FakeResponse(records(3, total=5)), FakeResponse(records(2, total=5))]
 
@@ -62,6 +69,7 @@ def test_extract_reads_every_page_until_the_total(fake_api):
 
 
 def test_extract_stops_on_an_empty_page(fake_api):
+    # Safety stop: an empty page ends the loop, so a wrong total can't cause endless requests
     calls, pages = fake_api
     pages += [FakeResponse([])]
 
@@ -70,6 +78,7 @@ def test_extract_stops_on_an_empty_page(fake_api):
 
 
 def test_extract_asks_for_all_fuels_and_no_other_filter(fake_api):
+    # Guards the request itself: a leftover filter would silently download only part of Portugal
     calls, pages = fake_api
     pages += [FakeResponse(records(1, total=1))]
 
@@ -77,10 +86,11 @@ def test_extract_asks_for_all_fuels_and_no_other_filter(fake_api):
 
     p = calls[0]
     assert len(p["idsTiposComb"].split(",")) == 13      # every fuel type ID
-    assert p["idMarca"] == p["idDistrito"] == p["idsMunicipios"] == ""
+    assert p["idMarca"] == p["idDistrito"] == p["idsMunicipios"] == ""   # empty = no filter
 
 
 def test_extract_fails_loudly_when_the_api_returns_an_error(fake_api):
+    # If DGEG is down (503), the run must crash, not continue and load an empty day as if it were real
     calls, pages = fake_api
     pages += [FakeResponse([], status_code=503)]
 

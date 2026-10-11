@@ -9,6 +9,8 @@ from etl.transform import limpar_preco, transform
 from tests.conftest import make_record
 
 
+# parametrize: runs the same test once per (input, expected) pair, each reported as its own test.
+# Easy to add a new format later: just add a line.
 @pytest.mark.parametrize(
     "texto, esperado",
     [
@@ -20,6 +22,7 @@ from tests.conftest import make_record
     ],
 )
 def test_limpar_preco_parses_portuguese_prices(texto, esperado):
+    # approx: floats can be off by a tiny amount (1.164 vs 1.16399999...), so compare with a tolerance
     assert limpar_preco(texto) == pytest.approx(esperado)
 
 
@@ -33,15 +36,17 @@ def test_transform_keeps_every_record_and_adds_numeric_price():
     registos = [make_record(posto_id=1, preco="1,164 €"), make_record(posto_id=2, preco="2,099 €")]
     df = transform(registos)
 
-    assert len(df) == 2
+    assert len(df) == 2   # no rows lost or duplicated
     assert df["Preco_num"].tolist() == pytest.approx([1.164, 2.099])
     # The original text is kept next to the number, for traceability
     assert df["Preco"].tolist() == ["1,164 €", "2,099 €"]
 
 
 def test_transform_works_on_a_real_api_sample(api_page):
+    # Real data catches what hand-made records might miss (odd fields, real price formats)
     df = transform(api_page["resultado"])
 
     assert len(df) == len(api_page["resultado"])
-    assert df["Preco_num"].between(0.5, 5).all()
+    assert df["Preco_num"].between(0.5, 5).all()   # sanity range for €/litre: catches a parsing slip like 1164
+    # The columns the load step depends on are present
     assert {"Id", "Combustivel", "Preco_num", "DataAtualizacao"} <= set(df.columns)
