@@ -363,4 +363,4 @@ Add four repository secrets under **Settings → Secrets and variables → Actio
 ## Author
 
 **André Francisco**: mechanical engineer (MSc, Instituto Superior Técnico) moving into data engineering.
-[LinkedIn](https://www.linkedin.com/in/your-profile)
+[LinkedIn](https://www.linkedin.com/in/your-profile) · [GitHub](https://github.com/amffpsa24-art)
