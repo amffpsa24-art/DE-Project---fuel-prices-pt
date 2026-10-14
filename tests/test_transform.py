@@ -3,6 +3,8 @@
 # ============================================
 # Created: 07/10/2026
 
+import math
+
 import pytest
 
 from etl.transform import limpar_preco, transform
@@ -30,6 +32,12 @@ def test_limpar_preco_rejects_text_that_is_not_a_price():
     # A garbled value must fail loudly, not turn silently into a wrong number
     with pytest.raises(ValueError):
         limpar_preco("sem preço")
+
+
+@pytest.mark.parametrize("texto", ["", "   ", " € ", None])
+def test_limpar_preco_returns_nan_for_missing_price(texto):
+    # A missing price is not garbled data: it becomes NaN, and the quality checks flag it
+    assert math.isnan(limpar_preco(texto))
 
 
 def test_transform_keeps_every_record_and_adds_numeric_price():
