@@ -30,32 +30,35 @@ Key findings (full details, in Portuguese, in [`notes/api-discovery.md`](notes/a
 
 - Each record is one **(station, fuel type)** pair, so a station selling 4 fuels appears 4 times, with its details repeated.
 - The `Quantidade` field holds the **total number of records** for the query (repeated on every row), which is what drives pagination.
-- The API accepts up to 10,000 records per page, so a full national extraction takes **2 requests** (~13,600–14,100 records, varying day to day).
+- The API accepts at least 20,000 records per page, so a full national extraction fits in **1 request** (~13,500–14,200 records, varying day to day).
+- Its sort order isn't stable: stations with the same price can swap places between two requests. With smaller pages, rows near the end of one page sometimes came back at the start of the next, and as many were skipped (see [Data quality notes](#data-quality-notes)). One page avoids that.
 - Prices arrive as Portuguese-formatted text (`"1,164 €"`) and need parsing.
 
-The data belongs to DGEG. Their terms allow personal, non-commercial use; this project is a non-commercial learning exercise and keeps request volume minimal (one run per day, with a pause between pages).
+The data belongs to DGEG. Their terms allow personal, non-commercial use; this project is a non-commercial learning exercise and keeps request volume minimal (one request per run, and a backup run that only calls DGEG if the main one didn't load the day).
 
 ## How it works
 
-The pipeline follows an **extract → transform → load** structure, with each step in its own module:
+The pipeline follows an **extract → transform → load** structure, with each step in its own module and class:
 
-| Step | File | What it does |
-|---|---|---|
-| Extract | [`etl/extract.py`](etl/extract.py) | Paginated requests to the DGEG API until every record is collected, retrying temporary errors |
-| Transform | [`etl/transform.py`](etl/transform.py) | Converts the JSON records into a pandas DataFrame and parses prices into numbers |
-| Quality checks | [`etl/quality.py`](etl/quality.py) | Stops a bad day before it reaches the database: volume, missing columns, empty required fields, price range, duplicates |
-| Load | [`etl/load.py`](etl/load.py) | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
-| Orchestration | [`pipeline.py`](pipeline.py) | Runs the steps in sequence and records the run in `pipeline_runs` |
-| Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | Runs the pipeline every day on GitHub Actions |
-| Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lints the code and runs the tests on every push |
-| Dashboard | [`dashboard/app.py`](dashboard/app.py) | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
+| Step | File | Class | What it does |
+|---|---|---|---|
+| Extract | [`etl/extract.py`](etl/extract.py) | `DgegExtractor` | Requests the DGEG API until every record is collected, retrying temporary errors and downloading again if pages overlap |
+| Transform | [`etl/transform.py`](etl/transform.py) | `Transformer` | Converts the JSON records into a pandas DataFrame and parses prices into numbers (an empty price becomes NaN) |
+| Quality checks | [`etl/quality.py`](etl/quality.py) | `QualityChecker` | Stops a bad day before it reaches the database: volume, missing columns, empty required fields, price range, duplicates |
+| Load | [`etl/load.py`](etl/load.py) | `RawStore`, `Warehouse` | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
+| Run log | [`etl/runs.py`](etl/runs.py) | `RunLog` | Records every run in `pipeline_runs` |
+| Orchestration | [`pipeline.py`](pipeline.py) | `Pipeline` | Runs the steps in sequence and records the run |
+| Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | | Runs the pipeline every day on GitHub Actions |
+| Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | | Lints the code and runs the tests on every push |
+| Dashboard | [`dashboard/app.py`](dashboard/app.py) | | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
+
+**Code design.** Each class takes its settings in its constructor (page size and retries, quality thresholds, the CSV folder, the database connection), and `Pipeline` receives the objects it runs instead of creating them. `Pipeline.default()` builds the production setup; the tests build their own, with a fake extractor, lower thresholds or a test database, without patching module variables. [`backfill.py`](backfill.py) reuses `RawStore` and `Warehouse` the same way. The dashboard stays as plain functions: Streamlit reruns the script on every click and caches functions, so classes would add code without a benefit.
 
 Example run (each line also starts with a timestamp, omitted here):
 
 ```
 INFO    pipeline: Run 2 started (schedule) for 2026-10-11
-INFO    etl.extract: Page 1: 10000 records (total: 10000 / 13479)
-INFO    etl.extract: Page 2: 3479 records (total: 13479 / 13479)
+INFO    etl.extract: Page 1: 13479 records (total: 13479 / 13479)
 INFO    pipeline: Extract complete: 13479 records
 INFO    pipeline: Transform complete: 13479 rows, 16 columns
 INFO    etl.load: Saved 13479 rows to data/raw/fuel_prices_2026-10-11.csv
@@ -88,7 +91,7 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 - **Schedule:** a main run every day at 13:17 UTC and a backup at 16:17 UTC. GitHub can start scheduled jobs hours late (the original 19:17 runs started 3–5 hours late, some after midnight in Lisbon), so both run early enough to finish the same day. The backup checks the run log and stops at once if the day is already loaded, so DGEG isn't called for nothing. The first successful snapshot of the day wins: if prices change between the two runs, the backup doesn't replace them. Runs can also be started manually from the Actions tab.
 - **Run log:** every run adds a row to `pipeline_runs`: start and end time, the snapshot date, who started it (schedule, backup or manual), status (success, failed or skipped), rows extracted and loaded, the error message, and the GitHub Actions run ID. The row is written on its own connection, outside the load's transaction, so a failed load still leaves a "failed" row instead of disappearing with the rollback.
 - **Quality checks:** before the database is touched, the day's data must have 12,000–16,000 rows (recent days: about 13,500), every column the load uses, no empty station ID, name, fuel or price, every price between 0.50 and 5.00 €, and no duplicated station × fuel. Any failure stops the run with one message listing every problem, and the run is recorded as failed, so a partial or garbled day never reaches the warehouse. The raw CSV is still saved, to see what was wrong. The thresholds come from real snapshots and live at the top of [`etl/quality.py`](etl/quality.py).
-- **Retries:** a connection error, timeout or 5xx response from DGEG is retried twice, after 10 and 30 seconds. A 4xx response means the request itself is wrong, so it fails at once. If all attempts fail, the backup run tries again later.
+- **Retries:** a connection error, timeout or 5xx response from DGEG is retried twice, after 10 and 30 seconds. A 4xx response means the request itself is wrong, so it fails at once. If all attempts fail, the backup run tries again later. A download whose pages don't add up (a station × fuel repeated, or fewer rows than the API announced) is repeated from the start, up to 3 times, a minute apart; if it's still wrong, the quality checks fail the run with the reason.
 - **Logging:** every line has a timestamp, level and module (see the example above), so a GitHub Actions log shows when and where something happened.
 - **Credentials:** the database connection comes from **GitHub Secrets**, exposed to the job as environment variables. No password is stored in the code or the repository.
 - **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV is uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step fails, so the raw data is never lost to a load error.
@@ -97,14 +100,14 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 
 ## Testing
 
-Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 39 tests.
+Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 47 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
 
 | Tests | What they check |
 |---|---|
-| [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, the transform on a real API sample |
-| [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, retries temporary errors, fails at once on a 4xx, gives up after 3 attempts. The tests never call DGEG. |
-| [`test_quality.py`](tests/test_quality.py) | The quality checks: a normal day passes; too few rows, an out-of-range price, an empty required field, a duplicate or a missing column each fail; all problems reported at once |
-| [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, and a failed load leaving nothing behind |
+| [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, an empty price becoming NaN, the transform on a real API sample |
+| [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, retries temporary errors, fails at once on a 4xx, gives up after 3 attempts, downloads again when pages overlap. The tests never call DGEG. |
+| [`test_quality.py`](tests/test_quality.py) | The quality checks: a normal day passes; too few rows, an out-of-range price, an empty required field or price, a duplicate or a missing column each fail; all problems reported at once |
+| [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, a failed load leaving nothing behind, and raw CSVs named and listed by date |
 | [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database |
 
 - **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
@@ -243,6 +246,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 
 - **Stale prices.** `data_atualizacao` shows that a handful of prices haven't been changed by their station in over a year (16 of 13,627 rows on 2026-10-04, the oldest from August 2024). They are kept in the warehouse exactly as DGEG reports them; deciding what is too old to trust is left to the analysis layer.
 - **Data gaps.** There is no snapshot for **2026-10-05**: GitHub started that day's scheduled run after midnight in Lisbon, so it was labelled 2026-10-06. DGEG keeps no history, so the day can't be recovered. Until 2026-10-11, capture times also varied between about 23:20 and 01:50 Lisbon time for the same reason. The data is left as captured: each snapshot holds the prices in force when it was taken. The earlier schedule and the run log (see [Automation](#automation)) now prevent and expose this. The days before 2026-10-04, apart from a first manual snapshot on 2026-09-27, predate the daily schedule.
+- **Page overlaps (found 2026-10-16).** With 10,000 records per page, about half of the downloads had a few rows from the end of page 1 repeated at the start of page 2, and as many rows skipped, with the total still right. The duplicate check caught it on 2026-10-16 and stopped the run. The pipeline now asks for 20,000 records per page, so a day fits in one request. Days loaded from 2026-10-11 on passed the duplicate check, so they weren't affected; earlier snapshots, taken before the checks existed, may be missing a few station × fuel prices.
 - **Text encoding.** All files and tables use **UTF-8**, so Portuguese characters (`ç`, `ã`, `ó`...) are stored exactly as DGEG sends them. Excel on Windows doesn't assume UTF-8 when a CSV is double-clicked and may show `Ã§` instead of `ç`. The data is correct: open the file with **Data → From Text/CSV** and choose **65001: Unicode (UTF-8)** as the file origin.
 
 ## Roadmap
@@ -263,6 +267,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 - [x] Data quality checks that stop a bad load (volume, schema, price ranges)
 - [x] Run log table (`pipeline_runs`) and a backup run that skips a day already loaded
 - [x] Retries for temporary API errors, and logging with timestamps and levels
+- [x] Object-oriented ETL: one class per step, passed into `Pipeline` so tests can swap any of them
 
 **Phase 2: Cloud storage**
 - [ ] Bronze layer in Azure Data Lake (untouched API responses)
@@ -289,19 +294,19 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 │   ├── app.py                  # Streamlit dashboard
 │   └── requirements.txt        # dashboard dependencies (separate from the pipeline's)
 ├── etl/
-│   ├── extract.py              # API requests and pagination
-│   ├── transform.py            # cleaning and parsing
-│   ├── quality.py              # data quality checks that stop a bad load
-│   ├── load.py                 # bronze CSV + PostgreSQL load
-│   └── runs.py                 # run log (pipeline_runs), written outside the load's transaction
+│   ├── extract.py              # DgegExtractor: API requests and pagination
+│   ├── transform.py            # Transformer: cleaning and parsing
+│   ├── quality.py              # QualityChecker: data quality checks that stop a bad load
+│   ├── load.py                 # RawStore (bronze CSV) + Warehouse (PostgreSQL load)
+│   └── runs.py                 # RunLog: pipeline_runs, written outside the load's transaction
 ├── sql/
 │   ├── schema.sql              # star schema: tables, keys, constraints
 │   ├── load_from_staging.sql   # staging → dimensions (SCD Type 2) → fact table
 │   ├── views.sql               # vw_precos: star schema joined for reading
 │   └── dashboard_role.sql      # permissions for a read-only dashboard user
 ├── tests/                      # unit tests + database tests (pytest)
-├── pipeline.py                 # runs the full ETL
-├── backfill.py                 # loads existing raw CSVs into PostgreSQL
+├── pipeline.py                 # Pipeline: runs the full ETL
+├── backfill.py                 # Backfill: loads existing raw CSVs into PostgreSQL
 ├── notebooks/                  # initial API exploration (dgeg_client.ipynb + a raw sample)
 ├── notes/                      # API discovery notes (api-discovery.md)
 ├── docs/images/                # diagrams and dashboard screenshot

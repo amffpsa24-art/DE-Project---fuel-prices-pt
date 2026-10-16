@@ -63,7 +63,7 @@ def test_database_url():
 def db(test_database_url):
     """
     A test database with a fresh, empty star schema for every test.
-    Returns the connection string to pass to load_postgres(..., conninfo=db).
+    Returns the connection string to pass to Warehouse(db) and RunLog(db).
     """
     # Drop and recreate everything before each test, so no test depends on data left by another.
     # autocommit: each statement is applied immediately (DROP/CREATE outside a transaction).
