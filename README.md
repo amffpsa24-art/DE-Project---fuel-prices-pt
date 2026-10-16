@@ -49,6 +49,7 @@ The pipeline follows an **extract → transform → load** structure, with each 
 | Run log | [`etl/runs.py`](etl/runs.py) | `RunLog` | Records every run in `pipeline_runs` |
 | Orchestration | [`pipeline.py`](pipeline.py) | `Pipeline` | Runs the steps in sequence and records the run |
 | Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | | Runs the pipeline every day on GitHub Actions |
+| Monitoring | [`monitor.py`](monitor.py), [`monitor.yml`](.github/workflows/monitor.yml) | `FreshnessMonitor` | Checks every evening that the day was loaded, and opens a GitHub issue if not |
 | Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | | Lints the code and runs the tests on every push |
 | Dashboard | [`dashboard/app.py`](dashboard/app.py) | | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
 
@@ -90,6 +91,7 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 
 - **Schedule:** a main run every day at 13:17 UTC and a backup at 16:17 UTC. GitHub can start scheduled jobs hours late (the original 19:17 runs started 3–5 hours late, some after midnight in Lisbon), so both run early enough to finish the same day. The backup checks the run log and stops at once if the day is already loaded, so DGEG isn't called for nothing. The first successful snapshot of the day wins: if prices change between the two runs, the backup doesn't replace them. Runs can also be started manually from the Actions tab.
 - **Run log:** every run adds a row to `pipeline_runs`: start and end time, the snapshot date, who started it (schedule, backup or manual), status (success, failed or skipped), rows extracted and loaded, the error message, and the GitHub Actions run ID. The row is written on its own connection, outside the load's transaction, so a failed load still leaves a "failed" row instead of disappearing with the rollback.
+- **Missing-day alert:** GitHub emails about a run that fails, but a day where no run happens at all (a cron started after midnight, as on 2026-10-05) sends nothing. Every evening (18:47 and 21:47 UTC) [`monitor.yml`](.github/workflows/monitor.yml) runs [`monitor.py`](monitor.py), which checks `pipeline_runs` for a successful snapshot of the day. If there isn't one, it opens a GitHub issue (email and mobile app) saying why: no run at all, or the last run's status and error. The later check closes the issue if a late or manual run loaded the day after all. It uses the workflow's own token, so no extra secret is needed.
 - **Quality checks:** before the database is touched, the day's data must have 12,000–16,000 rows (recent days: about 13,500), every column the load uses, no empty station ID, name, fuel or price, every price between 0.50 and 5.00 €, and no duplicated station × fuel. Any failure stops the run with one message listing every problem, and the run is recorded as failed, so a partial or garbled day never reaches the warehouse. The raw CSV is still saved, to see what was wrong. The thresholds come from real snapshots and live at the top of [`etl/quality.py`](etl/quality.py).
 - **Retries:** a connection error, timeout or 5xx response from DGEG is retried twice, after 10 and 30 seconds. A 4xx response means the request itself is wrong, so it fails at once. If all attempts fail, the backup run tries again later. A download whose pages don't add up (a station × fuel repeated, or fewer rows than the API announced) is repeated from the start, up to 3 times, a minute apart; if it's still wrong, the quality checks fail the run with the reason.
 - **Logging:** every line has a timestamp, level and module (see the example above), so a GitHub Actions log shows when and where something happened.
@@ -100,7 +102,7 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 
 ## Testing
 
-Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 47 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
+Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 53 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
 
 | Tests | What they check |
 |---|---|
@@ -109,6 +111,7 @@ Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: R
 | [`test_quality.py`](tests/test_quality.py) | The quality checks: a normal day passes; too few rows, an out-of-range price, an empty required field or price, a duplicate or a missing column each fail; all problems reported at once |
 | [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, a failed load leaving nothing behind, and raw CSVs named and listed by date |
 | [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database |
+| [`test_monitor.py`](tests/test_monitor.py) | The evening check, with a fake run log: which day it checks (including a check GitHub started after midnight), a loaded day passing, a day with no run or a failed run reported with the reason |
 
 - **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
 - **Testing the tests.** To check the tests catch real bugs, I broke the loading SQL on purpose. Replacing `IS DISTINCT FROM` with `<>` still passed every test at first: in SQL, a comparison with NULL gives "unknown", so `<>` silently misses changes such as coordinates added to a station that had none. I added a test for that case, and it now fails as soon as the comparison is broken.
@@ -268,6 +271,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 - [x] Run log table (`pipeline_runs`) and a backup run that skips a day already loaded
 - [x] Retries for temporary API errors, and logging with timestamps and levels
 - [x] Object-oriented ETL: one class per step, passed into `Pipeline` so tests can swap any of them
+- [x] Evening alert (GitHub issue) when a day has no successful snapshot
 
 **Phase 2: Cloud storage**
 - [ ] Bronze layer in Azure Data Lake (untouched API responses)
@@ -286,6 +290,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 │   └── devcontainer.json       # GitHub Codespaces setup: Python 3.14 + all dependencies
 ├── .github/workflows/
 │   ├── daily.yml               # daily schedule on GitHub Actions
+│   ├── monitor.yml             # evening check: opens an issue if the day wasn't loaded
 │   └── ci.yml                  # lint + tests on every push
 ├── .streamlit/
 │   ├── config.toml             # dashboard theme (colours, font)
@@ -307,6 +312,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ├── tests/                      # unit tests + database tests (pytest)
 ├── pipeline.py                 # Pipeline: runs the full ETL
 ├── backfill.py                 # Backfill: loads existing raw CSVs into PostgreSQL
+├── monitor.py                  # FreshnessMonitor: was the day loaded? (used by monitor.yml)
 ├── notebooks/                  # initial API exploration (dgeg_client.ipynb + a raw sample)
 ├── notes/                      # API discovery notes (api-discovery.md)
 ├── docs/images/                # diagrams and dashboard screenshot

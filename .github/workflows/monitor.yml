@@ -1,0 +1,82 @@
+# MONITOR: every evening, checks that the day was loaded; if not, opens a GitHub issue (email + mobile app)
+# Created: 16/10/2026
+#
+# Why a separate workflow: GitHub only emails about a run that FAILS. A day where no run happens at all
+# (a cron started after midnight, as on 05/10) sends nothing. This check catches both cases.
+
+name: Monitor fuel prices
+
+on:
+  schedule:
+    - cron: "47 18 * * *"   # 19:47 Lisbon in summer, 18:47 in winter: both daily runs have had time to finish
+    - cron: "47 21 * * *"   # later check: closes the issue if a late or manual run loaded the day after all
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # to open and close the alert issue (with the workflow's own token, no extra secret)
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # Same database settings as daily.yml (read-only use: one SELECT on pipeline_runs)
+      PGHOST: ${{ secrets.PGHOST }}
+      PGUSER: ${{ secrets.PGUSER }}
+      PGPASSWORD: ${{ secrets.PGPASSWORD }}
+      PGDATABASE: ${{ secrets.PGDATABASE }}
+      PGPORT: "5432"
+      PGSSLMODE: require
+      TZ: Europe/Lisbon
+      # gh (preinstalled on the runner) uses this token and repository
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Writes dia, carregado (true/false) and mensagem as step outputs
+      - name: Check the day was loaded
+        id: check
+        run: python monitor.py
+
+      # One issue per missing day: a second check the same evening doesn't open another one.
+      # Values go through env, never pasted into the script: an error message can't break or inject into it.
+      - name: Open an issue for a missing day
+        if: steps.check.outputs.carregado == 'false'
+        env:
+          TITULO: "Fuel prices not loaded for ${{ steps.check.outputs.dia }}"
+          MENSAGEM: ${{ steps.check.outputs.mensagem }}
+        run: |
+          aberta=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number')
+          if [ -z "$aberta" ]; then
+            gh issue create --title "$TITULO" --body "$MENSAGEM"
+          else
+            echo "Issue #$aberta is already open"
+          fi
+
+      - name: Close the issue once the day is loaded
+        if: steps.check.outputs.carregado == 'true'
+        env:
+          TITULO: "Fuel prices not loaded for ${{ steps.check.outputs.dia }}"
+        run: |
+          for n in $(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Loaded after all: closed by the evening check."
+          done
+
+      # Also mark the run as failed, so GitHub's usual failure email arrives too
+      - name: Fail if the day is missing
+        if: steps.check.outputs.carregado == 'false'
+        run: exit 1

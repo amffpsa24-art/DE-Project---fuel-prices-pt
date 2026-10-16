@@ -26,6 +26,17 @@ class RunLog:
             ).fetchone()
         return row is not None
 
+    def ultimo(self, snapshot_date):
+        """The day's most recent run as (triggered_by, status, error), or None if no run recorded it."""
+        with psycopg.connect(self.conninfo) as conn:
+            return conn.execute(
+                """
+                SELECT triggered_by, status, error FROM pipeline_runs
+                WHERE snapshot_date = %s ORDER BY run_id DESC LIMIT 1
+                """,
+                (snapshot_date,),
+            ).fetchone()
+
     def iniciar(self, snapshot_date, triggered_by, github_run_id=None, status="running"):
         """Adds the run's row and returns its run_id. A skipped run is recorded as already finished."""
         with psycopg.connect(self.conninfo, autocommit=True) as conn:

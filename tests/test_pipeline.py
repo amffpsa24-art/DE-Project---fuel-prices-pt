@@ -5,6 +5,8 @@
 # Updated: 16/10/2026 (tests grouped in classes; fakes passed to Pipeline instead of monkeypatched)
 # The whole pipeline runs here, but with a fake extractor (no call to DGEG) and the test database.
 
+from datetime import date
+
 import psycopg
 import pytest
 import requests
@@ -112,6 +114,8 @@ class TestFailedRuns:
 
         (error,) = query(db, "SELECT error FROM pipeline_runs")[0]
         assert error == "HTTPError: 503 error"   # the message is kept, to see why at a glance
+        # ...and RunLog.ultimo hands it to the evening monitor, for the alert
+        assert RunLog(db).ultimo(date.today()) == ("schedule", "failed", "HTTPError: 503 error")
 
     def test_a_failed_run_does_not_count_as_loaded(self, db, pipeline, extractor):
         # After a failure, the backup run must try again instead of skipping
