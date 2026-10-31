@@ -1,4 +1,4 @@
 # Everything the pipeline needs, plus the tools for testing and code checks
 -r requirements.txt
-pytest==9.1.1
-ruff==0.17.0
+pytest==9.2.0
+ruff==0.17.3
