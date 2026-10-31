@@ -50,11 +50,11 @@ jobs:
     steps:
       # 1. Download the repository's code onto the runner
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # 2. Install the same Python version used locally (pip cache speeds up later runs)
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -75,7 +75,7 @@ jobs:
       #    "always()" uploads them even if the database load or the Azure upload failed, so the raw data isn't lost.
       - name: Upload raw snapshot
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: raw-snapshot-${{ github.run_id }}
           path: |
