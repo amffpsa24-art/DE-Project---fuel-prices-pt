@@ -367,7 +367,7 @@ Copy `.env.example` to `.env` and fill in your connection settings. For a hosted
 **3. Run**
 
 ```bash
-python pipeline.py    # today's snapshot: raw CSV + database
+python pipeline.py    # today's snapshot: raw JSON (data/bronze/, + Azure if set in .env) + CSV + database
 python backfill.py    # optional: load any older CSVs from data/raw/
 ```
 
