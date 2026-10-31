@@ -127,6 +127,16 @@ class TestFailedRuns:
         # ...and RunLog.ultimo hands it to the evening monitor, for the alert
         assert RunLog(db).ultimo(date.today()) == ("schedule", "failed", "HTTPError: 503 error")
 
+    def test_an_empty_answer_fails_with_a_clear_message(self, db, pipeline, extractor):
+        # DGEG says "OK" but sends nothing: the alert must say so, not show a KeyError from the transform
+        extractor.registos = []
+
+        with pytest.raises(DataQualityError):
+            pipeline.run("schedule")
+
+        assert query(db, "SELECT status, error FROM pipeline_runs")[0] == (
+            "failed", "DataQualityError: DGEG answered with no records")
+
     def test_a_failed_run_does_not_count_as_loaded(self, db, pipeline, extractor):
         # After a failure, the backup run must try again instead of skipping
         extractor.registos = requests.HTTPError("503 error")

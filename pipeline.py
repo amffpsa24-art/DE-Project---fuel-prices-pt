@@ -3,7 +3,8 @@
 # Updated: 11/10/2026 (every run recorded in pipeline_runs; scheduled runs skip a day already loaded;
 #                      quality checks before the database load; logging)
 # Updated: 16/10/2026 (Pipeline class: each step is an object passed in, so tests can swap any of them)
-# Updated: 31/10/2026 (bronze layer: DGEG's raw answer saved right after the extract, and uploaded to Azure)
+# Updated: 31/10/2026 (bronze layer: DGEG's raw answer saved right after the extract, and uploaded to Azure;
+#                      a clear error when DGEG answers with no records)
 # Usage (from the project root, with .venv active):  python pipeline.py
 # GitHub Actions passes --trigger schedule or --trigger backup (see .github/workflows/daily.yml).
 
@@ -15,7 +16,7 @@ from datetime import date
 from etl.bronze import BronzeStore
 from etl.extract import DgegExtractor
 from etl.load import RawStore, Warehouse
-from etl.quality import QualityChecker
+from etl.quality import DataQualityError, QualityChecker
 from etl.runs import RunLog
 from etl.transform import Transformer
 
@@ -71,6 +72,9 @@ class Pipeline:
             # 1. Get the raw records from the DGEG API (retries temporary errors)
             registos = self.extractor.extract()
             log.info("Extract complete: %d records", len(registos))
+            if not registos:
+                # DGEG answered "OK" with nothing in it: say so, instead of a KeyError in the transform
+                raise DataQualityError("DGEG answered with no records")
 
             # 2. Bronze: DGEG's answer exactly as it came, before anything else can go wrong
             erro_bronze = self._guardar_bronze(registos, snapshot_date)

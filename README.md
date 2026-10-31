@@ -54,7 +54,7 @@ The pipeline follows an **extract → transform → load** structure, with each 
 | Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | | Lints the code and runs the tests on every push |
 | Dashboard | [`dashboard/app.py`](dashboard/app.py) | | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
 
-**Code design.** Each class takes its settings in its constructor (page size and retries, quality thresholds, the CSV folder, the database connection), and `Pipeline` receives the objects it runs instead of creating them. `Pipeline.default()` builds the production setup; the tests build their own, with a fake extractor, lower thresholds or a test database, without patching module variables. [`backfill.py`](backfill.py) reuses `RawStore` and `Warehouse` the same way. The dashboard stays as plain functions: Streamlit reruns the script on every click and caches functions, so classes would add code without a benefit.
+**Code design.** Each class takes its settings in its constructor (page size and retries, quality thresholds, the CSV folder, the database connection), and `Pipeline` receives the objects it runs instead of creating them. `Pipeline.default()` builds the production setup; the tests build their own, with a fake extractor, lower thresholds or a test database, without patching module variables. [`backfill.py`](backfill.py) reuses `RawStore`, `QualityChecker` and `Warehouse` the same way. The dashboard stays as plain functions: Streamlit reruns the script on every click and caches functions, so classes would add code without a benefit.
 
 Example run (each line also starts with a timestamp, omitted here):
 
@@ -83,7 +83,7 @@ The data moves through three layers, following the **medallion** pattern. Each l
 | **Silver** | Cleaned, typed data in one consistent format | `stg_precos`: typed staging table in PostgreSQL, refilled on every run |
 | **Gold** | Business-ready model for analysis | The star schema in Neon: `fact_precos` and three dimensions |
 
-If the gold layer ever needs rebuilding, it can be reloaded from bronze with [`backfill.py`](backfill.py).
+If the gold layer ever needs rebuilding, it can be reloaded from the raw CSVs with [`backfill.py`](backfill.py). It runs the same quality checks as the daily run and skips a day that fails them: the daily run saves its CSV before the checks, so failed days have a CSV too.
 
 Phase 1 is a lightweight version of the pattern: the silver layer is a staging table rather than a stored history. The bronze layer moved to Azure first, on 2026-10-31: GitHub deletes artifacts after 90 days and DGEG keeps no history, so it was the one layer that couldn't wait. The older artifact CSVs (which already include the parsed price column) are copied to `bronze/legacy_artifacts/` by [`archive-artifacts.yml`](.github/workflows/archive-artifacts.yml). JSON Lines under `date=` folders is what Spark reads directly, so Databricks can build silver Delta Lake tables from it in Phase 3.
 
@@ -91,7 +91,7 @@ Phase 1 is a lightweight version of the pattern: the silver layer is a staging t
 
 The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflows/daily.yml)) and writes to a **hosted PostgreSQL database on [Neon](https://neon.com)**, so it runs without any local machine switched on.
 
-- **Schedule:** a main run every day at 13:17 UTC and a backup at 16:17 UTC. GitHub can start scheduled jobs hours late (the original 19:17 runs started 3–5 hours late, some after midnight in Lisbon), so both run early enough to finish the same day. The backup checks the run log and stops at once if the day is already loaded, so DGEG isn't called for nothing. The first successful snapshot of the day wins: if prices change between the two runs, the backup doesn't replace them. Runs can also be started manually from the Actions tab.
+- **Schedule:** a main run every day at 10:17 UTC and a backup at 13:17 UTC. GitHub can start scheduled jobs hours late (the original 19:17 runs started 3–5 hours late, some after midnight in Lisbon; in late October the 13:17 run was starting around 18:30), so both are scheduled well before they're needed and still finish the same day. The backup checks the run log and stops at once if the day is already loaded, so DGEG isn't called for nothing. The first successful snapshot of the day wins: if prices change between the two runs, the backup doesn't replace them. Runs can also be started manually from the Actions tab.
 - **Run log:** every run adds a row to `pipeline_runs`: start and end time, the snapshot date, who started it (schedule, backup or manual), status (success, failed or skipped), rows extracted and loaded, the error message, and the GitHub Actions run ID. The row is written on its own connection, outside the load's transaction, so a failed load still leaves a "failed" row instead of disappearing with the rollback.
 - **Missing-day alert:** GitHub emails about a run that fails, but a day where no run happens at all (a cron started after midnight, as on 2026-10-05) sends nothing. Every evening (18:47 and 21:47 UTC) [`monitor.yml`](.github/workflows/monitor.yml) runs [`monitor.py`](monitor.py), which checks `pipeline_runs` for a successful snapshot of the day. If there isn't one, it opens a GitHub issue (email and mobile app) saying why: no run at all, or the last run's status and error. It also makes one one-row request to DGEG and says whether DGEG is answering right now, so the issue tells you whether a manual run can work yet or you have to wait (as on 2026-10-30, when DGEG's price search returned HTTP 500 for over a day). The monitor run is marked as failed only when it opens a new issue, so a missing day sends one alert, not one per check. The later check closes the issue if a late or manual run loaded the day after all. It uses the workflow's own token, so no extra secret is needed.
 - **Quality checks:** before the database is touched, the day's data must have 12,000–16,000 rows (recent days: about 13,500), every column the load uses, no empty station ID, name, fuel or price, every price between 0.50 and 5.00 €, and no duplicated station × fuel. Any failure stops the run with one message listing every problem, and the run is recorded as failed, so a partial or garbled day never reaches the warehouse. The raw CSV is still saved, to see what was wrong. The thresholds come from real snapshots and live at the top of [`etl/quality.py`](etl/quality.py).
@@ -106,16 +106,17 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 
 ## Testing
 
-Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 64 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
+Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 68 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
 
 | Tests | What they check |
 |---|---|
 | [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, an empty price becoming NaN, the transform on a real API sample |
 | [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, retries temporary errors, fails at once on a 4xx, gives up after 4 attempts, downloads again when pages overlap, the one-request DGEG availability check. The tests never call DGEG. |
 | [`test_bronze.py`](tests/test_bronze.py) | The bronze layer with a fake Azure container: records kept exactly as sent (text prices, Portuguese characters), file naming, a second run adding a file instead of replacing one, the local copy surviving a failed upload |
+| [`test_backfill.py`](tests/test_backfill.py) | The backfill, with a fake warehouse: a day that failed the quality checks (its CSV exists) is skipped, and prices read back from the CSV are numbers again |
 | [`test_quality.py`](tests/test_quality.py) | The quality checks: a normal day passes; too few rows, an out-of-range price, an empty required field or price, a duplicate or a missing column each fail; all problems reported at once |
-| [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, a failed load leaving nothing behind, and raw CSVs named and listed by date |
-| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database, the raw answer saved even when the checks fail, an Azure failure still loading the day but failing the job |
+| [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, a failed load leaving nothing behind, a warning when a day loaded out of order loses rows, and raw CSVs named and listed by date |
+| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database, an empty DGEG answer failing with a clear message, the raw answer saved even when the checks fail, an Azure failure still loading the day but failing the job |
 | [`test_monitor.py`](tests/test_monitor.py) | The evening check, with a fake run log: which day it checks (including a check GitHub started after midnight), a loaded day passing, a day with no run or a failed run reported with the reason, and the alert saying whether DGEG is answering (with a fake DGEG) |
 
 - **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
@@ -186,7 +187,7 @@ Stations change: a GALP becomes a PRIO, a station is renamed or moves. `dim_post
 - **Change detection.** Each run compares the incoming details with the current version, column by column, using `IS DISTINCT FROM` so that missing values (NULL) compare as equal instead of triggering false changes.
 - **Point-in-time lookup.** Each price is linked to the version valid on its snapshot day: `snapshot_date BETWEEN valido_de AND valido_ate`.
 - **Enforced in the database.** A partial unique index allows at most one current version (`atual`) per station.
-- **Known limits.** Snapshots must be loaded in date order (daily runs are; `backfill.py` sorts its files), and a change is dated to the first snapshot that shows it, so precision is one day.
+- **Known limits.** Snapshots must be loaded in date order (daily runs are; `backfill.py` sorts its files): a day loaded after a later one loses the prices of stations whose current version starts later. There's no error, so `Warehouse.load` logs a warning when fewer rows reach `fact_precos` than were staged. A change is dated to the first snapshot that shows it, so precision is one day.
 
 ### Design decisions
 
@@ -288,6 +289,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 - [ ] Delta Lake tables
 - [ ] Orchestration with Databricks Workflows or Azure Data Factory
 - [ ] Power BI dashboard
+- [ ] Long-term price history out of Neon: `fact_precos` grows about 1.65 MB a day (~600 MB a year at today's volume), so check the Neon plan's storage limit before then
 
 ## Project structure
 
@@ -368,7 +370,7 @@ Copy `.env.example` to `.env` and fill in your connection settings. For a hosted
 
 ```bash
 python pipeline.py    # today's snapshot: raw JSON (data/bronze/, + Azure if set in .env) + CSV + database
-python backfill.py    # optional: load any older CSVs from data/raw/
+python backfill.py    # optional: load any older CSVs from data/raw/ (days failing the quality checks are skipped)
 ```
 
 Both are safe to rerun: rows that already exist are skipped.
@@ -388,7 +390,14 @@ In **GitHub Codespaces**, the dev container installs everything and creates `.st
 
 Add four repository secrets under **Settings → Secrets and variables → Actions**: `PGHOST`, `PGUSER`, `PGPASSWORD` and `PGDATABASE`. The workflow in `.github/workflows/daily.yml` then runs every day, or on demand from the Actions tab.
 
-For the bronze layer in Azure, create a storage account (with **hierarchical namespace** on, i.e. Data Lake Storage Gen2, which Databricks reads best) and a container named `bronze`, then add its connection string as a fifth secret, `AZURE_STORAGE_CONNECTION_STRING` (Storage account → **Security + networking → Access keys**). Without it the pipeline still runs, keeping the raw JSON in the artifact only.
+For the bronze layer in Azure, create a storage account (with **hierarchical namespace** on, i.e. Data Lake Storage Gen2, which Databricks reads best) and a container named `bronze`, then add a connection string as a fifth secret, `AZURE_STORAGE_CONNECTION_STRING`. Without it the pipeline still runs, keeping the raw JSON in the artifact only.
+
+Use a **SAS** (shared access signature: a key limited to the actions you choose), not the account key from **Access keys**: the account key can also delete files, and bronze is the one layer that can't be rebuilt.
+
+1. Storage account → **Security + networking → Shared access signature**.
+2. Allowed services: **Blob** only. Allowed resource types: **Object** only. Permissions: **Read, Write, Create** only (no Delete, no List). Set an expiry, e.g. one year, and put a reminder in your calendar: when it expires the pipeline keeps loading Neon but the job fails with `Bronze not saved`.
+3. **Generate SAS and connection string**, and copy the **Connection string** into the secret.
+4. Also turn on **Data management → Data protection → Enable soft delete for blobs** (e.g. 30 days), so even a deleted file can be restored.
 
 ## Tech stack
 

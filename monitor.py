@@ -21,7 +21,7 @@ log = logging.getLogger("monitor")
 class FreshnessMonitor:
     """Decides which day must already be loaded, and checks pipeline_runs for it."""
 
-    # From this hour (Lisbon), today must be loaded: the main run (13:17 UTC) and the backup (16:17 UTC)
+    # From this hour (Lisbon), today must be loaded: the main run (10:17 UTC) and the backup (13:17 UTC)
     # have had time to finish. Before it, e.g. a check that GitHub started after midnight, it checks yesterday.
     HORA_LIMITE = 18
 

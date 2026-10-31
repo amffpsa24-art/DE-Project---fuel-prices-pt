@@ -35,7 +35,8 @@ class BronzeStore:
 
     @classmethod
     def default(cls):
-        """The local folder, plus Azure when AZURE_STORAGE_CONNECTION_STRING is set (GitHub Secret or .env)."""
+        """The local folder, plus Azure when AZURE_STORAGE_CONNECTION_STRING is set (GitHub Secret or .env).
+        It should be a SAS connection string without Delete: the job only ever adds files (see README)."""
         load_dotenv(PROJECT_ROOT / ".env")
         conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
         if not conn:

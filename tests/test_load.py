@@ -58,6 +58,15 @@ class TestLoad:
 
         assert counts(db) == antes
 
+    def test_warns_when_a_day_loaded_out_of_order_loses_rows(self, db, warehouse, caplog):
+        # Station 1's only version starts on day 2, so day 1's price has no version to point to and is dropped.
+        # There's no error, so the warning is the only sign (e.g. a backfill of an older day)
+        warehouse.load(df_de(make_record(posto_id=1)), DIA_2)
+
+        warehouse.load(df_de(make_record(posto_id=1)), DIA_1)
+
+        assert "Only 0 of 1 staged rows" in caplog.text
+
     def test_prices_are_stored_exactly(self, db, warehouse):
         warehouse.load(df_de(make_record(preco="1,164 €")), DIA_1)
 

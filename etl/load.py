@@ -5,6 +5,7 @@
 # Updated: 07/10/2026 (optional connection string, so tests can use a separate database)
 # Updated: 11/10/2026 (logging; pipeline.py calls save_raw_csv and load_postgres itself, with checks in between)
 # Updated: 16/10/2026 (RawStore and Warehouse classes: the folder and the connection string live on the object)
+# Updated: 31/10/2026 (warns when rows are dropped without an error, e.g. a day loaded out of date order)
 
 import logging
 from datetime import date
@@ -149,5 +150,10 @@ class Warehouse:
                 )
                 total_dia = cur.fetchone()[0]
 
+        # Fewer rows than staged means some were dropped without an error: the fact insert only keeps rows with a
+        # station version valid on that day, so a day loaded out of date order loses stations that changed later
+        if total_dia < len(linhas):
+            log.warning("Only %d of %d staged rows are in fact_precos for %s: was this day loaded out of date order?",
+                        total_dia, len(linhas), snapshot_date)
         log.info("Loaded PostgreSQL: %d price rows for %s", total_dia, snapshot_date)
         return total_dia
