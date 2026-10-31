@@ -45,6 +45,7 @@ The pipeline follows an **extract → transform → load** structure, with each 
 | Extract | [`etl/extract.py`](etl/extract.py) | `DgegExtractor` | Requests the DGEG API until every record is collected, retrying temporary errors and downloading again if pages overlap |
 | Transform | [`etl/transform.py`](etl/transform.py) | `Transformer` | Converts the JSON records into a pandas DataFrame and parses prices into numbers (an empty price becomes NaN) |
 | Quality checks | [`etl/quality.py`](etl/quality.py) | `QualityChecker` | Stops a bad day before it reaches the database: volume, missing columns, empty required fields, price range, duplicates |
+| Bronze | [`etl/bronze.py`](etl/bronze.py) | `BronzeStore` | Keeps DGEG's answer exactly as it came (gzipped JSON Lines), locally and in Azure Blob Storage, right after the extract |
 | Load | [`etl/load.py`](etl/load.py) | `RawStore`, `Warehouse` | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
 | Run log | [`etl/runs.py`](etl/runs.py) | `RunLog` | Records every run in `pipeline_runs` |
 | Orchestration | [`pipeline.py`](pipeline.py) | `Pipeline` | Runs the steps in sequence and records the run |
@@ -61,6 +62,7 @@ Example run (each line also starts with a timestamp, omitted here):
 INFO    pipeline: Run 2 started (schedule) for 2026-10-11
 INFO    etl.extract: Page 1: 13479 records (total: 13479 / 13479)
 INFO    pipeline: Extract complete: 13479 records
+INFO    etl.bronze: Saved 13479 raw records to data/bronze/dgeg_pesquisar_postos/date=2026-10-11/dgeg_2026-10-11T141802.jsonl.gz
 INFO    pipeline: Transform complete: 13479 rows, 16 columns
 INFO    etl.load: Saved 13479 rows to data/raw/fuel_prices_2026-10-11.csv
 INFO    etl.quality: Quality checks passed: 13479 rows
@@ -77,13 +79,13 @@ The data moves through three layers, following the **medallion** pattern. Each l
 
 | Layer | Purpose | Phase 1 (today) |
 |---|---|---|
-| **Bronze** | Faithful copy of the source, kept for reprocessing | A dated CSV per run: `data/raw/` locally, a GitHub Actions artifact in the cloud |
+| **Bronze** | Faithful copy of the source, kept for reprocessing | Since 2026-10-31: DGEG's answer untouched, one gzipped JSON Lines file per run in Azure Blob Storage (`bronze/dgeg_pesquisar_postos/date=YYYY-MM-DD/`). Before that: a dated CSV per run, kept as a GitHub Actions artifact |
 | **Silver** | Cleaned, typed data in one consistent format | `stg_precos`: typed staging table in PostgreSQL, refilled on every run |
 | **Gold** | Business-ready model for analysis | The star schema in Neon: `fact_precos` and three dimensions |
 
 If the gold layer ever needs rebuilding, it can be reloaded from bronze with [`backfill.py`](backfill.py).
 
-Phase 1 is a lightweight version of the pattern: the bronze CSV already includes the parsed price column next to the original text, and the silver layer is a staging table rather than a stored history. Phase 2 makes the layers explicit in Azure, with untouched API responses in bronze and cleaned Delta Lake tables in silver.
+Phase 1 is a lightweight version of the pattern: the silver layer is a staging table rather than a stored history. The bronze layer moved to Azure first, on 2026-10-31: GitHub deletes artifacts after 90 days and DGEG keeps no history, so it was the one layer that couldn't wait. The older artifact CSVs (which already include the parsed price column) are copied to `bronze/legacy_artifacts/` by [`archive-artifacts.yml`](.github/workflows/archive-artifacts.yml). JSON Lines under `date=` folders is what Spark reads directly, so Databricks can build silver Delta Lake tables from it in Phase 3.
 
 ## Automation
 
@@ -96,21 +98,24 @@ The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflo
 - **Retries:** a connection error, timeout or 5xx response from DGEG is retried 3 times, after 30 seconds, 2 minutes and 5 minutes, so a run rides out an outage of about 8 minutes. Each request waits up to 60 seconds: DGEG's own server gives up on a slow query at 30 seconds, so the log shows its HTTP 500 instead of a timeout on our side. A 4xx response means the request itself is wrong, so it fails at once. If all attempts fail, the backup run tries again later. The job's 20-minute timeout leaves room for the retries. A download whose pages don't add up (a station × fuel repeated, or fewer rows than the API announced) is repeated from the start, up to 3 times, a minute apart; if it's still wrong, the quality checks fail the run with the reason.
 - **Logging:** every line has a timestamp, level and module (see the example above), so a GitHub Actions log shows when and where something happened.
 - **Credentials:** the database connection comes from **GitHub Secrets**, exposed to the job as environment variables. No password is stored in the code or the repository.
-- **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV is uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step fails, so the raw data is never lost to a load error.
+- **Bronze layer:** right after the extract, before anything else can fail, [`BronzeStore`](etl/bronze.py) writes DGEG's answer exactly as it came and uploads it to **Azure Blob Storage**. Files are never overwritten: a second run on the same day adds a new file. If Azure fails, the day is still loaded into the warehouse (so it isn't lost there too), the run log notes `Bronze not saved` and the job turns red, so GitHub emails. Without the `AZURE_STORAGE_CONNECTION_STRING` secret, the raw JSON is kept in the artifact only.
+- **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV and bronze file are uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step or the Azure upload fails, so the raw data is never lost to a load error.
+- **Pinned dependencies:** every package in the `requirements` files has an exact version, so a new release can't break the daily run without a code change. [Dependabot](.github/dependabot.yml) proposes updates once a week as grouped pull requests, and CI tests each one before it's merged.
 - **Correct dates:** the job runs with the `Europe/Lisbon` time zone, so each snapshot gets the Portuguese date.
 - **Safe reruns:** because loads are idempotent, a retried or manual run on the same day never duplicates data.
 
 ## Testing
 
-Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 57 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
+Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 64 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
 
 | Tests | What they check |
 |---|---|
 | [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, an empty price becoming NaN, the transform on a real API sample |
 | [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, retries temporary errors, fails at once on a 4xx, gives up after 4 attempts, downloads again when pages overlap, the one-request DGEG availability check. The tests never call DGEG. |
+| [`test_bronze.py`](tests/test_bronze.py) | The bronze layer with a fake Azure container: records kept exactly as sent (text prices, Portuguese characters), file naming, a second run adding a file instead of replacing one, the local copy surviving a failed upload |
 | [`test_quality.py`](tests/test_quality.py) | The quality checks: a normal day passes; too few rows, an out-of-range price, an empty required field or price, a duplicate or a missing column each fail; all problems reported at once |
 | [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, a failed load leaving nothing behind, and raw CSVs named and listed by date |
-| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database |
+| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database, the raw answer saved even when the checks fail, an Azure failure still loading the day but failing the job |
 | [`test_monitor.py`](tests/test_monitor.py) | The evening check, with a fake run log: which day it checks (including a check GitHub started after midnight), a loaded day passing, a day with no run or a failed run reported with the reason, and the alert saying whether DGEG is answering (with a fake DGEG) |
 
 - **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
@@ -275,7 +280,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 - [x] Hardening after the 2026-10-30 DGEG outage: longer retries, one alert per missing day, the alert says whether DGEG is up
 
 **Phase 2: Cloud storage**
-- [ ] Bronze layer in Azure Data Lake (untouched API responses)
+- [x] Bronze layer in Azure Data Lake (untouched API responses), plus pinned dependencies with Dependabot
 - [ ] Explicit bronze / silver / gold layers
 
 **Phase 3: Distributed processing**
@@ -289,9 +294,11 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ```
 ├── .devcontainer/
 │   └── devcontainer.json       # GitHub Codespaces setup: Python 3.14 + all dependencies
+├── .github/dependabot.yml      # weekly pull requests with dependency updates
 ├── .github/workflows/
 │   ├── daily.yml               # daily schedule on GitHub Actions
 │   ├── monitor.yml             # evening check: opens an issue if the day wasn't loaded
+│   ├── archive-artifacts.yml   # one-off: copies the old artifacts to Azure before they expire
 │   └── ci.yml                  # lint + tests on every push
 ├── .streamlit/
 │   ├── config.toml             # dashboard theme (colours, font)
@@ -301,6 +308,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 │   └── requirements.txt        # dashboard dependencies (separate from the pipeline's)
 ├── etl/
 │   ├── extract.py              # DgegExtractor: API requests and pagination
+│   ├── bronze.py               # BronzeStore: DGEG's raw answer, locally and in Azure Blob Storage
 │   ├── transform.py            # Transformer: cleaning and parsing
 │   ├── quality.py              # QualityChecker: data quality checks that stop a bad load
 │   ├── load.py                 # RawStore (bronze CSV) + Warehouse (PostgreSQL load)
@@ -380,9 +388,11 @@ In **GitHub Codespaces**, the dev container installs everything and creates `.st
 
 Add four repository secrets under **Settings → Secrets and variables → Actions**: `PGHOST`, `PGUSER`, `PGPASSWORD` and `PGDATABASE`. The workflow in `.github/workflows/daily.yml` then runs every day, or on demand from the Actions tab.
 
+For the bronze layer in Azure, create a storage account (with **hierarchical namespace** on, i.e. Data Lake Storage Gen2, which Databricks reads best) and a container named `bronze`, then add its connection string as a fifth secret, `AZURE_STORAGE_CONNECTION_STRING` (Storage account → **Security + networking → Access keys**). Without it the pipeline still runs, keeping the raw JSON in the artifact only.
+
 ## Tech stack
 
-**Now:** Python, requests, pandas, PostgreSQL, psycopg, SQL, Neon, GitHub Actions, Streamlit, Plotly, Streamlit Community Cloud, pytest, Ruff, Git/GitHub
+**Now:** Python, requests, pandas, PostgreSQL, psycopg, SQL, Neon, Azure Blob Storage, GitHub Actions, Streamlit, Plotly, Streamlit Community Cloud, pytest, Ruff, Git/GitHub
 **Planned:** Azure Data Lake, Databricks, Spark, Delta Lake, Power BI
 
 ## Author

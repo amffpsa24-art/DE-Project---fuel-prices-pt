@@ -3,6 +3,7 @@
 # ============================================
 # Created: 11/10/2026
 # Updated: 16/10/2026 (tests grouped in classes; fakes passed to Pipeline instead of monkeypatched)
+# Updated: 31/10/2026 (bronze layer: saved before anything can fail, and an Azure failure never loses the day)
 # The whole pipeline runs here, but with a fake extractor (no call to DGEG) and the test database.
 
 from datetime import date
@@ -11,11 +12,12 @@ import psycopg
 import pytest
 import requests
 
+from etl.bronze import BronzeStore
 from etl.load import RawStore, Warehouse
 from etl.quality import DataQualityError, QualityChecker
 from etl.runs import RunLog
 from etl.transform import Transformer
-from pipeline import Pipeline
+from pipeline import BronzeError, Pipeline
 from tests.conftest import make_record, query
 
 
@@ -31,6 +33,13 @@ class FakeExtractor:
         if isinstance(self.registos, Exception):
             raise self.registos   # simulate DGEG failing
         return self.registos
+
+
+class BrokenBronze:
+    """Stands in for BronzeStore when Azure is down."""
+
+    def save(self, registos, snapshot_date):
+        raise ConnectionError("Azure unreachable")
 
 
 class NoChecks:
@@ -52,6 +61,7 @@ def pipeline(db, extractor, tmp_path):
         extractor=extractor,
         transformer=Transformer(),
         checker=QualityChecker(min_registos=1),   # small samples instead of a full day's ~13,500 rows
+        bronze_store=BronzeStore(tmp_path / "bronze"),   # local only: no Azure in tests
         raw_store=RawStore(tmp_path),
         warehouse=Warehouse(db),
         run_log=RunLog(db),
@@ -139,3 +149,26 @@ class TestFailedRuns:
         assert query(db, "SELECT COUNT(*) FROM fact_precos")[0][0] == 0
         # The raw CSV is still saved, to see what was wrong
         assert len(list(tmp_path.glob("fuel_prices_*.csv"))) == 1
+
+
+class TestBronze:
+    def test_the_raw_answer_is_saved_even_when_the_checks_fail(self, db, pipeline, extractor, tmp_path):
+        # Bronze comes right after the extract: whatever goes wrong later, DGEG's answer is kept
+        extractor.registos = [make_record(posto_id=1), make_record(posto_id=2, preco="11,64 €")]
+
+        with pytest.raises(DataQualityError):
+            pipeline.run("schedule")
+
+        assert len(list((tmp_path / "bronze").rglob("*.jsonl.gz"))) == 1
+
+    def test_a_bronze_failure_still_loads_the_day_but_fails_the_job(self, db, pipeline):
+        # Azure down must not lose the day in the warehouse too; the job still fails, so GitHub emails
+        pipeline.bronze_store = BrokenBronze()
+
+        with pytest.raises(BronzeError):
+            pipeline.run("schedule")
+
+        assert query(db, "SELECT COUNT(*) FROM fact_precos")[0][0] == 2
+        (status, error) = query(db, "SELECT status, error FROM pipeline_runs")[0]
+        assert status == "success"   # loaded: the monitor and the backup run treat the day as done
+        assert error == "Bronze not saved: ConnectionError: Azure unreachable"

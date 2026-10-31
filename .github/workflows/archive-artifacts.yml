@@ -1,0 +1,56 @@
+# ARCHIVE: copies the daily runs' artifacts (raw CSVs) to Azure before GitHub deletes them after 90 days
+# Created: 31/10/2026
+#
+# Why: until 31/10/2026 the pipeline kept its raw data only as GitHub artifacts. DGEG keeps no history, so once an
+# artifact expires that day's raw file is gone. Run this by hand (Actions > Archive artifacts > Run workflow) once
+# the AZURE_STORAGE_CONNECTION_STRING secret is set. Safe to run again: files already in Azure are skipped.
+
+name: Archive artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read   # to list and download this repository's artifacts
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+
+    steps:
+      # One folder per artifact: several runs on the same day each have a fuel_prices_<day>.csv
+      - name: Download every daily artifact that hasn't expired
+        run: |
+          mkdir -p archive
+          gh api --paginate "repos/$GH_REPO/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name | startswith("raw-snapshot-")) | select(.expired | not) | "\(.id) \(.name)"' |
+          while read -r id nome; do
+            gh api "repos/$GH_REPO/actions/artifacts/$id/zip" > "$nome.zip"
+            unzip -q -o "$nome.zip" -d "archive/$nome"
+            rm "$nome.zip"
+          done
+          find archive -type f | sort
+
+      # az (preinstalled on the runner) reads the connection string from the environment.
+      # A file already in Azure is skipped, never replaced, so the archive is append-only and reruns are safe.
+      - name: Upload to Azure (bronze/legacy_artifacts/)
+        run: |
+          if [ -z "$AZURE_STORAGE_CONNECTION_STRING" ]; then
+            echo "::error::Set the AZURE_STORAGE_CONNECTION_STRING secret first"; exit 1
+          fi
+          cd archive
+          find . -type f | sed 's#^\./##' | while read -r ficheiro; do
+            nome="legacy_artifacts/$ficheiro"
+            if [ "$(az storage blob exists -c bronze -n "$nome" --query exists -o tsv --only-show-errors)" = "true" ]; then
+              echo "Already in Azure: $nome"
+            else
+              az storage blob upload -c bronze -n "$nome" -f "$ficheiro" --only-show-errors -o none
+              echo "Uploaded: $nome"
+            fi
+          done

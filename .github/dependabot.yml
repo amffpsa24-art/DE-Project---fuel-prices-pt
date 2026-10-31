@@ -1,0 +1,30 @@
+# DEPENDABOT: proposes dependency updates as pull requests; CI runs the tests on each one before merging
+# Created: 31/10/2026
+# Why: requirements.txt pins exact versions, so nothing updates on its own. Grouped and weekly, so it's
+# one pull request per folder a week instead of one per package.
+
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"            # requirements.txt + requirements-dev.txt (the pipeline)
+    schedule:
+      interval: weekly
+    groups:
+      pipeline:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: "/dashboard"   # the Streamlit dashboard's own requirements
+    schedule:
+      interval: weekly
+    groups:
+      dashboard:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"            # actions/checkout, setup-python, upload-artifact in the workflows
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
