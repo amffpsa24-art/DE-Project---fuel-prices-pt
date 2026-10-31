@@ -1,5 +1,6 @@
 # MONITOR: checks that the day's snapshot was loaded, and says why not if it wasn't
 # Created: 16/10/2026
+# Updated: 31/10/2026 (the alert says whether DGEG is answering, i.e. whether a manual run can work yet)
 # Usage (from the project root, with .venv active):  python monitor.py
 # GitHub Actions runs it every evening (see .github/workflows/monitor.yml) and opens an issue if the day is missing.
 #
@@ -11,6 +12,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from etl.extract import DgegExtractor
 from etl.runs import RunLog
 
 log = logging.getLogger("monitor")
@@ -23,9 +25,12 @@ class FreshnessMonitor:
     # have had time to finish. Before it, e.g. a check that GitHub started after midnight, it checks yesterday.
     HORA_LIMITE = 18
 
-    def __init__(self, run_log, agora=None):
+    def __init__(self, run_log, agora=None, dgeg=None):
         self.run_log = run_log
         self.agora = agora   # tests pass a fixed time; None = the real clock
+        # Anything with disponivel() -> (ok, error): says in the alert whether a manual run can work right now.
+        # None = don't check (tests that don't care)
+        self.dgeg = dgeg
 
     def dia_a_verificar(self):
         agora = self.agora or datetime.now()
@@ -45,10 +50,19 @@ class FreshnessMonitor:
         else:
             triggered_by, status, error = ultimo
             motivo = f"The last run ({triggered_by}) ended as **{status}**" + (f": `{error}`" if error else ".")
+
+        estado, quando = "", "now"
+        if self.dgeg is not None:
+            ok, erro = self.dgeg.disponivel()
+            if ok:
+                estado = "DGEG is answering right now, so a manual run should work.\n\n"
+            else:
+                estado = f"DGEG is **not answering** right now (`{erro}`), so a manual run would fail too.\n\n"
+                quando = "as soon as DGEG answers again"
         mensagem = (
-            f"{dia} has no successful snapshot in `pipeline_runs`.\n\n{motivo}\n\n"
+            f"{dia} has no successful snapshot in `pipeline_runs`.\n\n{motivo}\n\n{estado}"
             "DGEG keeps no history, so this day is lost if it isn't loaded before midnight in Lisbon: "
-            "start **Actions > Daily fuel prices > Run workflow** now."
+            f"start **Actions > Daily fuel prices > Run workflow** {quando}."
         )
         return dia, False, mensagem
 
@@ -66,6 +80,6 @@ def escrever_output_github(**valores):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    dia, carregado, mensagem = FreshnessMonitor(RunLog()).verificar()
+    dia, carregado, mensagem = FreshnessMonitor(RunLog(), dgeg=DgegExtractor()).verificar()
     (log.info if carregado else log.warning)(mensagem.replace("\n\n", " "))
     escrever_output_github(dia=dia.isoformat(), carregado=str(carregado).lower(), mensagem=mensagem)

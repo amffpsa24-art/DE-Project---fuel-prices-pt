@@ -3,6 +3,8 @@
 # Updated: 11/10/2026 (retries for temporary errors, logging)
 # Updated: 16/10/2026 (download everything again when the pages don't add up)
 # Updated: 16/10/2026 (DgegExtractor class: settings live on the object, so tests can pass their own)
+# Updated: 31/10/2026 (timeout 30 -> 60s: DGEG's own server gives up at 30s, so the log shows its error;
+#                      longer retry pauses; disponivel() for the monitor)
 
 import logging
 import time
@@ -19,8 +21,9 @@ TIPOS_COMB = "2115,1143,1141,1142,3400,3210,3205,3405,3201,2150,2155,2105,2101"
 class DgegExtractor:
     """Downloads every station x fuel price from the DGEG API, page by page."""
 
-    def __init__(self, base_url=BASE_URL, tipos_comb=TIPOS_COMB, qtd_por_pagina=20_000, timeout=30,
-                 pausa_entre_paginas=1, pausas_retry=(10, 30), tentativas_extracao=3, pausa_entre_extracoes=60):
+    def __init__(self, base_url=BASE_URL, tipos_comb=TIPOS_COMB, qtd_por_pagina=20_000, timeout=60,
+                 pausa_entre_paginas=1, pausas_retry=(30, 120, 300), tentativas_extracao=3,
+                 pausa_entre_extracoes=60):
         self.base_url = base_url
         self.tipos_comb = tipos_comb
         # The API pages with an offset, and its order isn't stable (stations with the same price swap places
@@ -28,10 +31,13 @@ class DgegExtractor:
         # the page boundary and as many skipped (16/10/2026). 20,000 fits a whole day (~14,200 rows) in ONE page,
         # so there is no boundary; DGEG accepts it.
         self.qtd_por_pagina = qtd_por_pagina
+        # DGEG's server stops a slow query at 30s and answers 500. Waiting longer than that means the log
+        # shows DGEG's error instead of our own ReadTimeout (outage on 30/10/2026).
         self.timeout = timeout
         self.pausa_entre_paginas = pausa_entre_paginas
-        # Waits before the 2nd and 3rd attempt of a page. Temporary problems (network, DGEG overloaded) often
-        # pass in seconds; after 3 attempts the run fails, and the backup run tries again later.
+        # Waits before the 2nd, 3rd and 4th attempt of a page: together they ride out a DGEG outage of ~8 minutes
+        # (4 attempts x 60s + 7.5 min of pauses still fits the job's timeout). After that the run fails, and the
+        # backup run tries again later.
         self.pausas_retry = list(pausas_retry)
         # Safety net if a day ever needs more than one page: a download whose pages overlap
         # is repeated from page 1, after a pause.
@@ -81,9 +87,19 @@ class DgegExtractor:
                 break
 
             pagina += 1
-            time.sleep(self.pausa_entre_paginas)
+            time.sleep(self.pausa_entre_paginas)  # so server doesn't crash
 
         return todos_registos, total_registos
+
+    def disponivel(self):
+        """One one-row request, no retries: (True, None) if DGEG answers, else (False, the error). For the monitor."""
+        params = {**self._params(1), "qtdPorPagina": 1}
+        try:
+            requests.get(self.base_url, params=params, timeout=self.timeout).raise_for_status()
+            return True, None
+        except requests.RequestException as e:
+            # requests adds the whole query string to the message; the alert doesn't need it
+            return False, f"{type(e).__name__}: {str(e).split(' for url:')[0]}"
 
     def _params(self, pagina):
         """Query string for one page: every fuel, no other filter (empty = all of Portugal)."""

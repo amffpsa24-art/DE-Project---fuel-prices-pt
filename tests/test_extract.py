@@ -100,11 +100,11 @@ class TestPagination:
 class TestRetries:
     def test_fails_loudly_when_the_api_keeps_failing(self, api):
         # If DGEG stays down (503 on every attempt), the run must crash, not load an empty day as if it were real
-        api.pages += [FakeResponse([], status_code=503)] * 3
+        api.pages += [FakeResponse([], status_code=503)] * 4
 
         with pytest.raises(requests.HTTPError):
             DgegExtractor().extract()
-        assert len(api.calls) == 3      # 1 attempt + 2 retries, then gives up
+        assert len(api.calls) == 4      # 1 attempt + 3 retries, then gives up
 
     def test_retries_a_temporary_error(self, api):
         # A hiccup (503, then a dropped connection) shouldn't fail the day: the next attempt succeeds
@@ -120,6 +120,24 @@ class TestRetries:
 
         with pytest.raises(requests.HTTPError):
             DgegExtractor().extract()
+        assert len(api.calls) == 1
+
+
+class TestDisponivel:
+    def test_dgeg_answering(self, api):
+        api.pages += [FakeResponse(records(1, total=1))]
+
+        assert DgegExtractor().disponivel() == (True, None)
+        assert api.calls[0]["qtdPorPagina"] == 1   # a one-row request, not the whole day
+
+    def test_dgeg_down_is_reported_once_without_retries(self, api):
+        # The monitor only wants to know if DGEG is up now: one try, and the error for the alert
+        api.pages += [FakeResponse([], status_code=500)]
+
+        ok, erro = DgegExtractor().disponivel()
+
+        assert ok is False
+        assert "HTTPError: 500" in erro
         assert len(api.calls) == 1
 
 

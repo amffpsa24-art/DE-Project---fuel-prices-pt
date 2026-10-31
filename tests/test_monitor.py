@@ -2,6 +2,7 @@
 # Unit tests: the evening check that a day was loaded (no database: a fake run log)
 # ============================================
 # Created: 16/10/2026
+# Updated: 31/10/2026 (the alert says whether DGEG is answering)
 
 from datetime import date, datetime
 
@@ -22,6 +23,16 @@ class FakeRunLog:
 
     def ultimo(self, snapshot_date):
         return self.ultimos.get(snapshot_date)
+
+
+class FakeDgeg:
+    """Stands in for DgegExtractor.disponivel(): a fixed answer, no network."""
+
+    def __init__(self, ok, erro):
+        self.resposta = (ok, erro)
+
+    def disponivel(self):
+        return self.resposta
 
 
 HOJE, ONTEM = date(2026, 10, 16), date(2026, 10, 15)
@@ -65,3 +76,21 @@ class TestVerificar:
         assert "(schedule) ended as **failed**" in mensagem
         assert "5 duplicated" in mensagem
         assert "Run workflow" in mensagem
+
+    def test_says_a_manual_run_should_work_when_dgeg_answers(self):
+        monitor = FreshnessMonitor(FakeRunLog(), self.agora, dgeg=FakeDgeg(True, None))
+
+        _, _, mensagem = monitor.verificar()
+
+        assert "DGEG is answering" in mensagem
+        assert "Run workflow** now" in mensagem
+
+    def test_says_to_wait_when_dgeg_is_down(self):
+        # As on 30/10/2026: a manual run would fail the same way, so the alert says to wait for DGEG
+        monitor = FreshnessMonitor(FakeRunLog(), self.agora, dgeg=FakeDgeg(False, "HTTPError: 500 Server Error"))
+
+        _, _, mensagem = monitor.verificar()
+
+        assert "DGEG is **not answering**" in mensagem
+        assert "HTTPError: 500" in mensagem
+        assert "as soon as DGEG answers again" in mensagem

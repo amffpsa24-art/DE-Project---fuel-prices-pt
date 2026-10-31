@@ -1,5 +1,6 @@
 # MONITOR: every evening, checks that the day was loaded; if not, opens a GitHub issue (email + mobile app)
 # Created: 16/10/2026
+# Updated: 31/10/2026 (fails the run only when it opens a new issue: one alert per missing day, not one per check)
 #
 # Why a separate workflow: GitHub only emails about a run that FAILS. A day where no run happens at all
 # (a cron started after midnight, as on 05/10) sends nothing. This check catches both cases.
@@ -55,6 +56,7 @@ jobs:
       # One issue per missing day: a second check the same evening doesn't open another one.
       # Values go through env, never pasted into the script: an error message can't break or inject into it.
       - name: Open an issue for a missing day
+        id: issue
         if: steps.check.outputs.carregado == 'false'
         env:
           TITULO: "Fuel prices not loaded for ${{ steps.check.outputs.dia }}"
@@ -63,6 +65,7 @@ jobs:
           aberta=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number')
           if [ -z "$aberta" ]; then
             gh issue create --title "$TITULO" --body "$MENSAGEM"
+            echo "nova=true" >> "$GITHUB_OUTPUT"
           else
             echo "Issue #$aberta is already open"
           fi
@@ -76,7 +79,8 @@ jobs:
             gh issue close "$n" --comment "Loaded after all: closed by the evening check."
           done
 
-      # Also mark the run as failed, so GitHub's usual failure email arrives too
+      # Also mark the run as failed, so GitHub's usual failure email arrives too. Only when the issue is new:
+      # a later check of the same missing day (e.g. the 21:47 one) stays quiet instead of emailing again.
       - name: Fail if the day is missing
-        if: steps.check.outputs.carregado == 'false'
+        if: steps.issue.outputs.nova == 'true'
         run: exit 1

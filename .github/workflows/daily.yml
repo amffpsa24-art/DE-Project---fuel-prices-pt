@@ -2,6 +2,7 @@
 # Created: 04/10/2026
 # Updated: 11/10/2026 (earlier main run + backup run: GitHub started the 19:17 runs 3-5 hours late,
 #                      some after midnight in Lisbon, so 05/10 got no snapshot)
+# Updated: 31/10/2026 (job timeout 15 -> 20 min: the longer retries for a DGEG outage need the room)
 
 name: Daily fuel prices
 
@@ -26,7 +27,7 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # stop a stuck run instead of letting it hang for hours
+    timeout-minutes: 20  # stop a stuck run instead of letting it hang for hours (retries alone can take ~12 min)
 
     env:
       # Database connection: secret values come from Settings > Secrets and variables > Actions.
