@@ -262,6 +262,8 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 
 ![Roadmap](docs/images/roadmap.png)
 
+What changed and when, with the reasons, is in the [changelog](CHANGELOG.md).
+
 **Phase 1: MVP** *(complete)*
 - [x] Discover and document the DGEG API
 - [x] Modular ETL in Python (requests, pandas)
@@ -327,6 +329,7 @@ The gap between the cheapest district (Braga) and the most expensive (Bragança)
 ├── notebooks/                  # initial API exploration (dgeg_client.ipynb + a raw sample)
 ├── notes/                      # API discovery notes (api-discovery.md)
 ├── docs/images/                # diagrams and dashboard screenshot
+├── CHANGELOG.md                # what changed and when, newest first
 ├── .env.example                # template for database settings
 ├── pyproject.toml              # pytest and Ruff settings
 ├── requirements.txt            # pipeline dependencies
