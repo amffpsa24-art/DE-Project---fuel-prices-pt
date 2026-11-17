@@ -1,5 +1,4 @@
 # DEPENDABOT: proposes dependency updates as pull requests; CI runs the tests on each one before merging
-# Created: 31/10/2026
 # Why: requirements.txt pins exact versions, so nothing updates on its own. Grouped and weekly, so it's
 # one pull request per folder a week instead of one per package.
 

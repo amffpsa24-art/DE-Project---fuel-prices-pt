@@ -1,12 +1,9 @@
 # MONITOR: checks that the day's snapshot was loaded, and says why not if it wasn't
-# Created: 16/10/2026
-# Updated: 31/10/2026 (the alert says whether DGEG is answering, i.e. whether a manual run can work yet)
 # Usage (from the project root, with .venv active):  python monitor.py
 # GitHub Actions runs it every evening (see .github/workflows/monitor.yml) and opens an issue if the day is missing.
 #
-# Why: GitHub emails a failed run, but a day where NO run happens (a cron started after midnight, as on 05/10)
-# fails nothing and sends nothing. DGEG keeps no history, so a missed day is lost for good unless someone
-# notices before midnight and starts the workflow by hand.
+# GitHub emails about a failed run, but a day where NO run happens sends nothing.
+# DGEG keeps no history, so a missed day is lost unless someone starts the workflow by hand before midnight.
 
 import logging
 import os
@@ -21,65 +18,65 @@ log = logging.getLogger("monitor")
 class FreshnessMonitor:
     """Decides which day must already be loaded, and checks pipeline_runs for it."""
 
-    # From this hour (Lisbon), today must be loaded: the main run (10:17 UTC) and the backup (13:17 UTC)
-    # have had time to finish. Before it, e.g. a check that GitHub started after midnight, it checks yesterday.
-    HORA_LIMITE = 18
+    # From this hour (Lisbon), today must be loaded. Before it (e.g. a check GitHub started after midnight),
+    # it checks yesterday.
+    CUTOFF_HOUR = 18
 
-    def __init__(self, run_log, agora=None, dgeg=None):
+    def __init__(self, run_log, now=None, dgeg=None):
         self.run_log = run_log
-        self.agora = agora   # tests pass a fixed time; None = the real clock
-        # Anything with disponivel() -> (ok, error): says in the alert whether a manual run can work right now.
-        # None = don't check (tests that don't care)
+        self.now = now     # tests pass a fixed time; None = the real clock
+        # Anything with is_available() -> (ok, error), to say in the alert whether a manual run can work now.
+        # None = don't check
         self.dgeg = dgeg
 
-    def dia_a_verificar(self):
-        agora = self.agora or datetime.now()
-        if agora.hour >= self.HORA_LIMITE:
-            return agora.date()
-        return agora.date() - timedelta(days=1)
+    def day_to_check(self):
+        now = self.now or datetime.now()
+        if now.hour >= self.CUTOFF_HOUR:
+            return now.date()
+        return now.date() - timedelta(days=1)
 
-    def verificar(self):
+    def check(self):
         """Returns (day, loaded, message). The message explains a missing day, for the alert."""
-        dia = self.dia_a_verificar()
-        if self.run_log.ja_carregado(dia):
-            return dia, True, f"{dia} is loaded."
+        day = self.day_to_check()
+        if self.run_log.is_loaded(day):
+            return day, True, f"{day} is loaded."
 
-        ultimo = self.run_log.ultimo(dia)
-        if ultimo is None:
-            motivo = "No run recorded this day at all: GitHub probably started the scheduled runs late or skipped them."
+        last = self.run_log.last_run(day)
+        if last is None:
+            reason = "No run recorded this day at all: GitHub probably started the scheduled runs late or skipped them."
         else:
-            triggered_by, status, error = ultimo
-            motivo = f"The last run ({triggered_by}) ended as **{status}**" + (f": `{error}`" if error else ".")
+            triggered_by, status, error = last
+            reason = f"The last run ({triggered_by}) ended as **{status}**" + (f": `{error}`" if error else ".")
 
-        estado, quando = "", "now"
+        dgeg_status, when = "", "now"
         if self.dgeg is not None:
-            ok, erro = self.dgeg.disponivel()
+            ok, error = self.dgeg.is_available()
             if ok:
-                estado = "DGEG is answering right now, so a manual run should work.\n\n"
+                dgeg_status = "DGEG is answering right now, so a manual run should work.\n\n"
             else:
-                estado = f"DGEG is **not answering** right now (`{erro}`), so a manual run would fail too.\n\n"
-                quando = "as soon as DGEG answers again"
-        mensagem = (
-            f"{dia} has no successful snapshot in `pipeline_runs`.\n\n{motivo}\n\n{estado}"
+                dgeg_status = f"DGEG is **not answering** right now (`{error}`), so a manual run would fail too.\n\n"
+                when = "as soon as DGEG answers again"
+        message = (
+            f"{day} has no successful snapshot in `pipeline_runs`.\n\n{reason}\n\n{dgeg_status}"
             "DGEG keeps no history, so this day is lost if it isn't loaded before midnight in Lisbon: "
-            f"start **Actions > Daily fuel prices > Run workflow** {quando}."
+            f"start **Actions > Daily fuel prices > Run workflow** {when}."
         )
-        return dia, False, mensagem
+        return day, False, message
 
 
-def escrever_output_github(**valores):
+def write_github_output(**values):
     """Passes values to the next workflow steps (GITHUB_OUTPUT); does nothing when run locally."""
-    caminho = os.environ.get("GITHUB_OUTPUT")
-    if not caminho:
+    path = os.environ.get("GITHUB_OUTPUT")
+    if not path:
         return
-    with open(caminho, "a", encoding="utf-8") as f:
-        for chave, valor in valores.items():
+    with open(path, "a", encoding="utf-8") as f:
+        for key, value in values.items():
             # Multi-line values need the heredoc-style syntax
-            f.write(f"{chave}<<FIM\n{valor}\nFIM\n")
+            f.write(f"{key}<<EOF\n{value}\nEOF\n")
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    dia, carregado, mensagem = FreshnessMonitor(RunLog(), dgeg=DgegExtractor()).verificar()
-    (log.info if carregado else log.warning)(mensagem.replace("\n\n", " "))
-    escrever_output_github(dia=dia.isoformat(), carregado=str(carregado).lower(), mensagem=mensagem)
+    day, loaded, message = FreshnessMonitor(RunLog(), dgeg=DgegExtractor()).check()
+    (log.info if loaded else log.warning)(message.replace("\n\n", " "))
+    write_github_output(day=day.isoformat(), loaded=str(loaded).lower(), message=message)

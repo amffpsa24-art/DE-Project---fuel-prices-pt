@@ -1,5 +1,4 @@
 # ARCHIVE: copies the daily runs' artifacts (raw CSVs) to Azure before GitHub deletes them after 90 days
-# Created: 31/10/2026
 #
 # Why: until 31/10/2026 the pipeline kept its raw data only as GitHub artifacts. DGEG keeps no history, so once an
 # artifact expires that day's raw file is gone. Run this by hand (Actions > Archive artifacts > Run workflow) once

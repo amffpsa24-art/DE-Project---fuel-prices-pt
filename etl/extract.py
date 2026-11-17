@@ -1,10 +1,4 @@
-# Extract fuel price records from the DGEG API
-# Created: 27/09/2026
-# Updated: 11/10/2026 (retries for temporary errors, logging)
-# Updated: 16/10/2026 (download everything again when the pages don't add up)
-# Updated: 16/10/2026 (DgegExtractor class: settings live on the object, so tests can pass their own)
-# Updated: 31/10/2026 (timeout 30 -> 60s: DGEG's own server gives up at 30s, so the log shows its error;
-#                      longer retry pauses; disponivel() for the monitor)
+# EXTRACT: downloads every station x fuel price from the DGEG API
 
 import logging
 import time
@@ -15,83 +9,54 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://precoscombustiveis.dgeg.gov.pt/api/PrecoComb/PesquisarPostos"
 
-TIPOS_COMB = "2115,1143,1141,1142,3400,3210,3205,3405,3201,2150,2155,2105,2101"
+# Every fuel type DGEG knows (13 IDs)
+FUEL_IDS = "2115,1143,1141,1142,3400,3210,3205,3405,3201,2150,2155,2105,2101"
 
 
 class DgegExtractor:
-    """Downloads every station x fuel price from the DGEG API, page by page."""
+    """Downloads every record from the DGEG API, retrying when DGEG is temporarily down."""
 
-    def __init__(self, base_url=BASE_URL, tipos_comb=TIPOS_COMB, qtd_por_pagina=20_000, timeout=60,
-                 pausa_entre_paginas=1, pausas_retry=(30, 120, 300), tentativas_extracao=3,
-                 pausa_entre_extracoes=60):
+    def __init__(self, base_url=BASE_URL, fuel_ids=FUEL_IDS, page_size=20_000, timeout=60,
+                 page_pause=1, retry_pauses=(30, 120, 300)):
         self.base_url = base_url
-        self.tipos_comb = tipos_comb
-        # The API pages with an offset, and its order isn't stable (stations with the same price swap places
-        # between requests). With 10,000 rows per page, about half of the downloads had rows repeated across
-        # the page boundary and as many skipped (16/10/2026). 20,000 fits a whole day (~14,200 rows) in ONE page,
-        # so there is no boundary; DGEG accepts it.
-        self.qtd_por_pagina = qtd_por_pagina
-        # DGEG's server stops a slow query at 30s and answers 500. Waiting longer than that means the log
-        # shows DGEG's error instead of our own ReadTimeout (outage on 30/10/2026).
+        self.fuel_ids = fuel_ids
+        # 20,000 fits a whole day (~14,200 rows) in ONE page. With smaller pages, DGEG's unstable sort order
+        # repeated some rows and skipped others (see CHANGELOG, 2026-10-16).
+        self.page_size = page_size
+        # DGEG gives up on a slow query at 30s; waiting 60s means the log shows DGEG's own error
         self.timeout = timeout
-        self.pausa_entre_paginas = pausa_entre_paginas
-        # Waits before the 2nd, 3rd and 4th attempt of a page: together they ride out a DGEG outage of ~8 minutes
-        # (4 attempts x 60s + 7.5 min of pauses still fits the job's timeout). After that the run fails, and the
-        # backup run tries again later.
-        self.pausas_retry = list(pausas_retry)
-        # Safety net if a day ever needs more than one page: a download whose pages overlap
-        # is repeated from page 1, after a pause.
-        self.tentativas_extracao = tentativas_extracao
-        self.pausa_entre_extracoes = pausa_entre_extracoes
+        self.page_pause = page_pause
+        # Waits before the 2nd, 3rd and 4th attempt: together they ride out a DGEG outage of about 8 minutes
+        self.retry_pauses = list(retry_pauses)
 
     def extract(self):
-        """Fetch all available fuel price records, downloading again if the pages don't add up."""
-        for tentativa in range(1, self.tentativas_extracao + 1):
-            registos, total_registos = self._extract_uma_vez()
-            problema = self._problema_paginas(registos, total_registos)
-            if problema is None:
-                return registos
-            if tentativa < self.tentativas_extracao:
-                log.warning("Download %d is inconsistent (%s); downloading again in %ds",
-                            tentativa, problema, self.pausa_entre_extracoes)
-                time.sleep(self.pausa_entre_extracoes)
-
-        # Still wrong after every attempt: return it anyway, so the quality checks fail the run
-        # and pipeline_runs records why
-        log.warning("Download still inconsistent after %d attempts (%s)", self.tentativas_extracao, problema)
-        return registos
-
-    def _extract_uma_vez(self):
-        """Fetch every page once. Returns the records and the total the API announced (None if nothing came)."""
-        todos_registos = []
-        pagina = 1
-        total_registos = None
+        """Fetches all records, page by page, until the total the API announced is reached."""
+        records = []
+        page = 1
+        total = None
 
         while True:
-            response = self._get_com_retries(self._params(pagina))
-            registos_pagina = response.json().get("resultado", [])
-
-            if not registos_pagina:
+            response = self._get_with_retries(self._params(page))
+            page_records = response.json().get("resultado", [])
+            if not page_records:
                 break
 
-            todos_registos.extend(registos_pagina)
+            records.extend(page_records)
+            # "Quantidade" holds the total number of records (repeated on every row)
+            if total is None:
+                total = page_records[0]["Quantidade"]
+            log.info("Page %d: %d records (total: %d / %d)", page, len(page_records), len(records), total)
 
-            # "Quantidade" contains the total number of records returned by the API.
-            if total_registos is None:
-                total_registos = registos_pagina[0]["Quantidade"]
-
-            log.info("Page %d: %d records (total: %d / %d)",
-                     pagina, len(registos_pagina), len(todos_registos), total_registos)
-
-            if len(todos_registos) >= total_registos:
+            if len(records) >= total:
                 break
+            page += 1
+            time.sleep(self.page_pause)   # be gentle with DGEG's server
 
-            pagina += 1
-            time.sleep(self.pausa_entre_paginas)  # so server doesn't crash
+        if total is not None and len(records) < total:
+            log.warning("Got %d records, but the API announced %d", len(records), total)
+        return records
 
-        return todos_registos, total_registos
-
-    def disponivel(self):
+    def is_available(self):
         """One one-row request, no retries: (True, None) if DGEG answers, else (False, the error). For the monitor."""
         params = {**self._params(1), "qtdPorPagina": 1}
         try:
@@ -101,21 +66,21 @@ class DgegExtractor:
             # requests adds the whole query string to the message; the alert doesn't need it
             return False, f"{type(e).__name__}: {str(e).split(' for url:')[0]}"
 
-    def _params(self, pagina):
+    def _params(self, page):
         """Query string for one page: every fuel, no other filter (empty = all of Portugal)."""
         return {
-            "idsTiposComb": self.tipos_comb,
+            "idsTiposComb": self.fuel_ids,
             "idMarca": "",
             "idTipoPosto": "",
             "idDistrito": "",
             "idsMunicipios": "",
-            "qtdPorPagina": self.qtd_por_pagina,
-            "pagina": pagina,
+            "qtdPorPagina": self.page_size,
+            "pagina": page,
         }
 
-    def _get_com_retries(self, params):
-        """GET one page, retrying on temporary errors: connection problems, timeouts and 5xx responses."""
-        for tentativa in range(len(self.pausas_retry) + 1):
+    def _get_with_retries(self, params):
+        """GETs one page, retrying temporary errors: connection problems, timeouts and 5xx responses."""
+        for attempt in range(len(self.retry_pauses) + 1):
             try:
                 response = requests.get(self.base_url, params=params, timeout=self.timeout)
                 response.raise_for_status()
@@ -123,20 +88,9 @@ class DgegExtractor:
             except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
                 # 4xx means the request itself is wrong: retrying won't help, so fail at once
                 status = getattr(e.response, "status_code", None)
-                temporario = status is None or status >= 500
-                if not temporario or tentativa == len(self.pausas_retry):
+                temporary = status is None or status >= 500
+                if not temporary or attempt == len(self.retry_pauses):
                     raise
-                pausa = self.pausas_retry[tentativa]
-                log.warning("Page %s, attempt %d failed (%s); retrying in %ds",
-                            params["pagina"], tentativa + 1, e, pausa)
-                time.sleep(pausa)
-
-    @staticmethod
-    def _problema_paginas(registos, total_registos):
-        """Describes what is wrong with a download (rows repeated across pages, missing rows), or None if it's fine."""
-        chaves = {(r["Id"], r["Combustivel"]) for r in registos}
-        if len(chaves) < len(registos):
-            return f"{len(registos) - len(chaves)} station x fuel rows came twice"
-        if total_registos is not None and len(registos) < total_registos:
-            return f"{len(registos)} rows, but the API said {total_registos}"
-        return None
+                pause = self.retry_pauses[attempt]
+                log.warning("Page %s, attempt %d failed (%s); retrying in %ds", params["pagina"], attempt + 1, e, pause)
+                time.sleep(pause)

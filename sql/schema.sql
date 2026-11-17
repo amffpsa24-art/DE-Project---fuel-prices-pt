@@ -1,7 +1,4 @@
 -- Star schema for the fuel prices warehouse
--- Created: 04/10/2026
--- Updated: 04/10/2026
--- Updated: 11/10/2026 (pipeline_runs: one row per pipeline run, for monitoring)
 
 CREATE TABLE IF NOT EXISTS dim_data (
     data_key      INTEGER     PRIMARY KEY,

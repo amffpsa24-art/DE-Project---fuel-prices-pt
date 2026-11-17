@@ -1,5 +1,4 @@
---- Load staging data into the dimensional model
--- Created: 04/10/2026
+-- Load staging data into the dimensional model
 -- Assumes snapshots are processed chronologically.
 
 -- Date dimension

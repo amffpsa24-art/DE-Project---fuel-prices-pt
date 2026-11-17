@@ -5,10 +5,24 @@ How the project changed over time, newest first. Each entry says what changed an
 ## Unreleased
 
 ### Planned
-- Remove the CSV raw layer (`RawStore`) once Azure has a few weeks of bronze, and make `backfill.py` read the bronze JSON instead
 - Explicit bronze / silver / gold layers (Phase 2)
 - Databricks + Spark, Delta Lake tables, orchestration, Power BI (Phase 3)
 - Move the long-term price history out of Neon before it reaches the plan's storage limit
+
+## 2026-11-17: Simpler code, one copy of the raw data
+
+Same features, less code to read. The pipeline had picked up a layer of defence code after every incident; this pass keeps the protection and removes what no longer earns its place.
+
+### Changed
+- **One language in the code.** Functions, variables and comments are in English (`check`, `is_loaded`, `records`...). Names that come from DGEG or the database (`Preco`, `distrito`, `fact_precos`) stay in Portuguese.
+- **One copy of the raw data.** The daily run no longer writes a CSV to `data/raw/`: the bronze JSON already holds DGEG's answer, untouched. `backfill.py` now rebuilds the warehouse from the bronze files, and still reads the old CSVs for the days before 2026-10-31.
+- **An Azure failure fails the run.** The upload is retried once; if it fails again, the run is recorded as failed and the backup run tries the whole day again. This replaces the special "loaded, but bronze not saved" case. The raw JSON is still in the run's artifact either way.
+- **Dashboard split into three files:** `app.py` (layout and tabs), `queries.py` (database reads) and `charts.py` (colours, theme, chart helpers).
+- Shorter file headers: the "Created / Updated" history now lives only here and in git.
+
+### Removed
+- The extractor's "download everything again when pages overlap" loop. Since 2026-10-16 a whole day fits in one page, so pages can't overlap; if they ever did, the duplicate check would still stop the run.
+- `RawStore` and the CSV step of the daily run (see above).
 
 ## 2026-10-31: Bronze layer in Azure, hardening after the DGEG outage
 
@@ -75,6 +89,8 @@ Both daily runs failed. DGEG's price search (`PesquisarPostos`) returned HTTP 50
 
 ### Added
 - **pytest** suite with unit tests and database tests.
+- Tests run on a saved sample of DGEG's answer (`tests/fixtures/api_page.json`), so they stay fast and offline and still see real data.
+- `notebooks/data/fuel_prices_raw.csv`: a full DGEG snapshot (about 14,000 rows) kept in the repo as sample data.
 - **CI on every push** (`ci.yml`): Ruff lint and the tests against a PostgreSQL service in GitHub Actions.
 - README: Testing section, CI badge, dashboard screenshot.
 
@@ -101,8 +117,9 @@ The biggest day: from CSV files on a laptop to a hosted warehouse, a daily sched
 - `backfill.py`: reloads every raw CSV, oldest first.
 - **Station history with SCD Type 2** in `dim_postos`, so old prices keep the brand and name the station had at the time. Neon was rebuilt from the raw CSVs to switch over.
 - **Hosted database on Neon** and a **daily GitHub Actions workflow** (19:17 UTC), with credentials in GitHub Secrets and the raw CSV kept as an artifact.
-- **Read layer:** the `vw_precos` view and a `dashboard_reader` user that can only read.
+- **Read layer:** the `vw_precos` view and a `dashboard_reader` user that can only read. The view's `dias_desde_atualizacao` column counts the days since the station last changed the price, so stale prices stand out.
 - **Streamlit dashboard** at [fuel-prices-pt.streamlit.app](https://fuel-prices-pt.streamlit.app/): map, price evolution, stations with CSV download, price changes, station history, brands.
+- Dashboard design: a light corporate theme (`.streamlit/config.toml`, IBM Plex Sans), a price board at the top with the average price of the everyday fuels, and a "How it's built" tab.
 - Architecture, ERD, medallion and roadmap diagrams.
 
 ## 2026-09-27: First pipeline

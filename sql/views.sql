@@ -1,6 +1,4 @@
---- Dashboard-facing view
--- Created: 04/10/2026
--- Updated: 04/10/2026
+-- Dashboard-facing view
 
 CREATE OR REPLACE VIEW vw_precos AS
 SELECT

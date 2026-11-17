@@ -1,8 +1,4 @@
-# ============================================
 # Unit tests: the evening check that a day was loaded (no database: a fake run log)
-# ============================================
-# Created: 16/10/2026
-# Updated: 31/10/2026 (the alert says whether DGEG is answering)
 
 from datetime import date, datetime
 
@@ -14,83 +10,83 @@ from monitor import FreshnessMonitor
 class FakeRunLog:
     """Stands in for RunLog: the days loaded, and the last run of each day as (triggered_by, status, error)."""
 
-    def __init__(self, carregados=(), ultimos=None):
-        self.carregados = set(carregados)
-        self.ultimos = ultimos or {}
+    def __init__(self, loaded=(), last_runs=None):
+        self.loaded = set(loaded)
+        self.last_runs = last_runs or {}
 
-    def ja_carregado(self, snapshot_date):
-        return snapshot_date in self.carregados
+    def is_loaded(self, snapshot_date):
+        return snapshot_date in self.loaded
 
-    def ultimo(self, snapshot_date):
-        return self.ultimos.get(snapshot_date)
+    def last_run(self, snapshot_date):
+        return self.last_runs.get(snapshot_date)
 
 
 class FakeDgeg:
-    """Stands in for DgegExtractor.disponivel(): a fixed answer, no network."""
+    """Stands in for DgegExtractor.is_available(): a fixed answer, no network."""
 
-    def __init__(self, ok, erro):
-        self.resposta = (ok, erro)
+    def __init__(self, ok, error):
+        self.answer = (ok, error)
 
-    def disponivel(self):
-        return self.resposta
+    def is_available(self):
+        return self.answer
 
 
-HOJE, ONTEM = date(2026, 10, 16), date(2026, 10, 15)
+TODAY, YESTERDAY = date(2026, 10, 16), date(2026, 10, 15)
 
 
 class TestWhichDay:
     @pytest.mark.parametrize(
-        "agora, esperado",
+        "now, expected",
         [
-            (datetime(2026, 10, 16, 19, 47), HOJE),    # the evening check, on time
-            (datetime(2026, 10, 16, 23, 59), HOJE),    # started late, still the same day
-            (datetime(2026, 10, 17, 1, 30), HOJE),     # started after midnight: checks the day that just ended
+            (datetime(2026, 10, 16, 19, 47), TODAY),    # the evening check, on time
+            (datetime(2026, 10, 16, 23, 59), TODAY),    # started late, still the same day
+            (datetime(2026, 10, 17, 1, 30), TODAY),     # started after midnight: checks the day that just ended
         ],
     )
-    def test_checks_the_day_that_should_be_loaded(self, agora, esperado):
-        assert FreshnessMonitor(FakeRunLog(), agora).dia_a_verificar() == esperado
+    def test_checks_the_day_that_should_be_loaded(self, now, expected):
+        assert FreshnessMonitor(FakeRunLog(), now).day_to_check() == expected
 
 
-class TestVerificar:
-    agora = datetime(2026, 10, 16, 19, 47)
+class TestCheck:
+    now = datetime(2026, 10, 16, 19, 47)
 
     def test_a_loaded_day_is_fine(self):
-        dia, carregado, _ = FreshnessMonitor(FakeRunLog(carregados=[HOJE]), self.agora).verificar()
+        day, loaded, _ = FreshnessMonitor(FakeRunLog(loaded=[TODAY]), self.now).check()
 
-        assert (dia, carregado) == (HOJE, True)
+        assert (day, loaded) == (TODAY, True)
 
     def test_a_day_with_no_run_at_all_is_reported(self):
         # The case GitHub never emails about: nothing ran, so nothing failed
-        _, carregado, mensagem = FreshnessMonitor(FakeRunLog(carregados=[ONTEM]), self.agora).verificar()
+        _, loaded, message = FreshnessMonitor(FakeRunLog(loaded=[YESTERDAY]), self.now).check()
 
-        assert carregado is False
-        assert "No run recorded" in mensagem
+        assert loaded is False
+        assert "No run recorded" in message
 
     def test_a_failed_day_reports_the_error(self):
         # The alert says why, so the next step is obvious without opening the logs
-        run_log = FakeRunLog(ultimos={HOJE: ("schedule", "failed", "DataQualityError: 5 duplicated station x fuel rows")})
+        run_log = FakeRunLog(last_runs={TODAY: ("schedule", "failed", "DataQualityError: 5 duplicated station x fuel rows")})
 
-        _, carregado, mensagem = FreshnessMonitor(run_log, self.agora).verificar()
+        _, loaded, message = FreshnessMonitor(run_log, self.now).check()
 
-        assert carregado is False
-        assert "(schedule) ended as **failed**" in mensagem
-        assert "5 duplicated" in mensagem
-        assert "Run workflow" in mensagem
+        assert loaded is False
+        assert "(schedule) ended as **failed**" in message
+        assert "5 duplicated" in message
+        assert "Run workflow" in message
 
     def test_says_a_manual_run_should_work_when_dgeg_answers(self):
-        monitor = FreshnessMonitor(FakeRunLog(), self.agora, dgeg=FakeDgeg(True, None))
+        monitor = FreshnessMonitor(FakeRunLog(), self.now, dgeg=FakeDgeg(True, None))
 
-        _, _, mensagem = monitor.verificar()
+        _, _, message = monitor.check()
 
-        assert "DGEG is answering" in mensagem
-        assert "Run workflow** now" in mensagem
+        assert "DGEG is answering" in message
+        assert "Run workflow** now" in message
 
     def test_says_to_wait_when_dgeg_is_down(self):
         # As on 30/10/2026: a manual run would fail the same way, so the alert says to wait for DGEG
-        monitor = FreshnessMonitor(FakeRunLog(), self.agora, dgeg=FakeDgeg(False, "HTTPError: 500 Server Error"))
+        monitor = FreshnessMonitor(FakeRunLog(), self.now, dgeg=FakeDgeg(False, "HTTPError: 500 Server Error"))
 
-        _, _, mensagem = monitor.verificar()
+        _, _, message = monitor.check()
 
-        assert "DGEG is **not answering**" in mensagem
-        assert "HTTPError: 500" in mensagem
-        assert "as soon as DGEG answers again" in mensagem
+        assert "DGEG is **not answering**" in message
+        assert "HTTPError: 500" in message
+        assert "as soon as DGEG answers again" in message

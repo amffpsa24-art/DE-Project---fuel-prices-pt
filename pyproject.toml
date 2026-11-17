@@ -14,3 +14,6 @@ extend-exclude = ["notebooks"]
 # Ruff's default rules (real errors: undefined names, unused imports, syntax problems),
 # plus import sorting (I) and common bug patterns (B)
 select = ["E4", "E7", "E9", "F", "I", "B"]
+[tool.ruff.lint.isort]
+# The dashboard's own modules (dashboard/charts.py, dashboard/queries.py), listed after the libraries
+known-first-party = ["charts", "queries"]

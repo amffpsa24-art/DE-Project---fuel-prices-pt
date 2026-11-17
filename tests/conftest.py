@@ -1,5 +1,4 @@
 # Shared test setup: sample records and a clean test database
-# Created: 07/10/2026
 # pytest loads this file automatically: every fixture here can be used by any test, without importing it.
 
 import json

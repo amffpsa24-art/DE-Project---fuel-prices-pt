@@ -47,15 +47,18 @@ The pipeline follows **extract → transform → load (ETL)**. Each step has its
 | Bronze | [`etl/bronze.py`](etl/bronze.py) | Saves DGEG's answer exactly as it came, locally and in Azure Blob Storage |
 | Transform | [`etl/transform.py`](etl/transform.py) | Turns the JSON into a pandas table and converts prices to numbers |
 | Quality checks | [`etl/quality.py`](etl/quality.py) | Stops a bad day before it reaches the database |
-| Load | [`etl/load.py`](etl/load.py) | Saves a dated CSV, then loads the data into PostgreSQL |
+| Load | [`etl/load.py`](etl/load.py) | Loads the data into PostgreSQL |
 | Run log | [`etl/runs.py`](etl/runs.py) | Records every run in a `pipeline_runs` table |
 | Orchestration | [`pipeline.py`](pipeline.py) | Runs all the steps in order |
 | Scheduling | [`daily.yml`](.github/workflows/daily.yml) | Runs the pipeline every day on GitHub Actions |
 | Monitoring | [`monitor.py`](monitor.py) | Checks every evening that the day was loaded, and opens a GitHub issue if not |
 | Testing | [`ci.yml`](.github/workflows/ci.yml) | Checks the code and runs the tests on every push |
-| Dashboard | [`dashboard/app.py`](dashboard/app.py) | Public Streamlit app that reads the warehouse |
+| Backfill | [`backfill.py`](backfill.py) | Rebuilds the warehouse from the saved raw data |
+| Dashboard | [`dashboard/`](dashboard/) | Public Streamlit app that reads the warehouse |
 
 Each class gets its settings when it's created, and `Pipeline` receives the steps it runs instead of creating them. This makes testing easy: a test can give it a fake extractor or a test database.
+
+**Naming:** the code is in English. Names that come from DGEG or the database (`Preco`, `distrito`, `fact_precos`) stay in Portuguese, so they match the data.
 
 Example run (timestamps removed):
 
@@ -65,7 +68,6 @@ INFO    etl.extract: Page 1: 13479 records (total: 13479 / 13479)
 INFO    pipeline: Extract complete: 13479 records
 INFO    etl.bronze: Saved 13479 raw records to data/bronze/dgeg_pesquisar_postos/date=2026-10-11/dgeg_2026-10-11T141802.jsonl.gz
 INFO    pipeline: Transform complete: 13479 rows, 16 columns
-INFO    etl.load: Saved 13479 rows to data/raw/fuel_prices_2026-10-11.csv
 INFO    etl.quality: Quality checks passed: 13479 rows
 INFO    etl.load: Staged 13479 rows in stg_precos
 INFO    etl.load: Loaded PostgreSQL: 13479 price rows for 2026-10-11
@@ -84,7 +86,9 @@ The data moves through three layers. Each one builds on the one before, and the 
 | **Silver** | Cleaned data with proper types | `stg_precos`, a staging table in PostgreSQL, refilled on every run |
 | **Gold** | Data modelled for analysis | The star schema in PostgreSQL (Neon) |
 
-The bronze layer went to Azure first because it was the most urgent: DGEG keeps no history and GitHub deletes old files after 90 days. The old CSVs are copied to Azure by [`archive-artifacts.yml`](.github/workflows/archive-artifacts.yml). If the warehouse ever needs to be rebuilt, [`backfill.py`](backfill.py) reloads it from the saved CSVs.
+The bronze layer went to Azure first because it was the most urgent: DGEG keeps no history and GitHub deletes old files after 90 days. The old CSVs are copied to Azure by [`archive-artifacts.yml`](.github/workflows/archive-artifacts.yml).
+
+If the warehouse ever needs to be rebuilt, [`backfill.py`](backfill.py) reloads it from the bronze files (and from the old CSVs for days before 2026-10-31). It runs the same transform and quality checks as the daily run, one day at a time, oldest first.
 
 ## Automation
 
@@ -95,7 +99,7 @@ The pipeline runs every day on **GitHub Actions** and writes to a hosted **Postg
 - **Missing-day alert.** If no run happens at all, GitHub sends no email. So every evening [`monitor.py`](monitor.py) checks that the day was loaded. If not, it opens a GitHub issue saying what went wrong and whether DGEG is currently up. A later check closes the issue if the day was loaded after all.
 - **Quality checks.** Before anything is loaded, the day must have 12,000–16,000 rows, all the needed columns, no empty key fields, prices between 0.50 and 5.00 €, and no duplicates. If any check fails, the run stops and nothing reaches the warehouse.
 - **Retries.** If DGEG is down or slow, the request is retried 3 times (after 30 seconds, 2 minutes and 5 minutes). If that still fails, the backup run tries later.
-- **Raw data is never lost.** DGEG's answer is saved to Azure right after the download, before anything else can fail. The day's files are also kept on GitHub for 90 days.
+- **Raw data is never lost.** DGEG's answer is saved to Azure right after the download, before anything else can fail. If the upload fails twice, the run fails and the backup run tries again. The day's file is also kept on GitHub for 90 days either way.
 - **Secrets.** Database and Azure credentials are stored in GitHub Secrets, never in the code.
 - **Safe reruns.** Running the pipeline twice on the same day never creates duplicate data.
 - **Pinned dependencies.** Every package has a fixed version. [Dependabot](.github/dependabot.yml) suggests updates once a week, and the tests run on each one before it's merged.
@@ -109,11 +113,11 @@ Every push runs the [CI workflow](.github/workflows/ci.yml): Ruff checks the cod
 |---|---|
 | [`test_transform.py`](tests/test_transform.py) | Prices are converted correctly (`"1,164 €"` → `1.164`) and bad values fail loudly |
 | [`test_extract.py`](tests/test_extract.py) | Downloading, retries and error handling, using a fake API (the tests never call DGEG) |
-| [`test_bronze.py`](tests/test_bronze.py) | Raw data is saved exactly as received, and files are never overwritten |
+| [`test_bronze.py`](tests/test_bronze.py) | Raw data is saved exactly as received, files are never overwritten, a failed upload is retried once |
 | [`test_quality.py`](tests/test_quality.py) | A normal day passes, and each kind of bad data fails |
 | [`test_load.py`](tests/test_load.py) | Loading into a real PostgreSQL: correct data, no duplicates on rerun, station history, nothing kept if a load fails |
 | [`test_pipeline.py`](tests/test_pipeline.py) | The run log, the backup run, and bad or empty days never reaching the database |
-| [`test_backfill.py`](tests/test_backfill.py) | Reloading from old CSVs, skipping days that failed the checks |
+| [`test_backfill.py`](tests/test_backfill.py) | Rebuilding from bronze files and old CSVs, in date order, skipping days that failed the checks |
 | [`test_monitor.py`](tests/test_monitor.py) | The evening check finds missing days and reports why |
 
 The database tests use a separate test database and refuse to run against any database whose name doesn't end in `_test`, so the real data is never touched.
@@ -268,13 +272,15 @@ The full history of changes is in the [changelog](CHANGELOG.md).
 │   ├── archive-artifacts.yml   # one-off: copies old files to Azure
 │   └── ci.yml                  # lint + tests on every push
 ├── dashboard/
-│   └── app.py                  # Streamlit dashboard
+│   ├── app.py                  # Streamlit dashboard: layout, sidebar and tabs
+│   ├── queries.py              # every database read, cached
+│   └── charts.py               # colours, theme and chart helpers
 ├── etl/
 │   ├── extract.py              # download from the DGEG API
-│   ├── bronze.py               # save the raw data (local + Azure)
+│   ├── bronze.py               # save and read the raw data (local + Azure)
 │   ├── transform.py            # clean and convert
 │   ├── quality.py              # quality checks
-│   ├── load.py                 # save CSV + load PostgreSQL
+│   ├── load.py                 # load PostgreSQL
 │   └── runs.py                 # run log
 ├── sql/
 │   ├── schema.sql              # star schema tables
@@ -286,7 +292,7 @@ The full history of changes is in the [changelog](CHANGELOG.md).
 ├── notes/                      # API discovery notes
 ├── docs/images/                # diagrams and screenshot
 ├── pipeline.py                 # runs the full ETL
-├── backfill.py                 # reloads old CSVs into PostgreSQL
+├── backfill.py                 # rebuilds the warehouse from the raw data
 ├── monitor.py                  # checks if the day was loaded
 ├── CHANGELOG.md                # history of changes
 ├── .env.example                # template for database settings
@@ -331,7 +337,7 @@ Copy `.env.example` to `.env` and fill in your connection settings. For a hosted
 
 ```bash
 python pipeline.py    # today's snapshot
-python backfill.py    # optional: load older CSVs from data/raw/
+python backfill.py    # optional: rebuild from data/bronze/ (and old CSVs in data/raw/)
 ```
 
 Both are safe to run more than once.

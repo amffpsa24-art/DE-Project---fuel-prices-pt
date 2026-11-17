@@ -1,5 +1,4 @@
 # CI: checks the code and runs the tests on every push and pull request
-# Created: 07/10/2026
 
 name: CI
 

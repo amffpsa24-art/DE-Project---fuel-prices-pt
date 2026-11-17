@@ -1,15 +1,13 @@
 # MONITOR: every evening, checks that the day was loaded; if not, opens a GitHub issue (email + mobile app)
-# Created: 16/10/2026
-# Updated: 31/10/2026 (fails the run only when it opens a new issue: one alert per missing day, not one per check)
 #
-# Why a separate workflow: GitHub only emails about a run that FAILS. A day where no run happens at all
-# (a cron started after midnight, as on 05/10) sends nothing. This check catches both cases.
+# GitHub only emails about a run that FAILS. A day where no run happens at all sends nothing.
+# This check catches both cases.
 
 name: Monitor fuel prices
 
 on:
   schedule:
-    - cron: "47 18 * * *"   # 19:47 Lisbon in summer, 18:47 in winter: both daily runs have had time to finish
+    - cron: "47 18 * * *"   # both daily runs have had time to finish
     - cron: "47 21 * * *"   # later check: closes the issue if a late or manual run loaded the day after all
   workflow_dispatch:
 
@@ -23,7 +21,7 @@ jobs:
     timeout-minutes: 5
 
     env:
-      # Same database settings as daily.yml (read-only use: one SELECT on pipeline_runs)
+      # Same database settings as daily.yml (one SELECT on pipeline_runs)
       PGHOST: ${{ secrets.PGHOST }}
       PGUSER: ${{ secrets.PGUSER }}
       PGPASSWORD: ${{ secrets.PGPASSWORD }}
@@ -48,39 +46,39 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Writes dia, carregado (true/false) and mensagem as step outputs
+      # Writes day, loaded (true/false) and message as step outputs
       - name: Check the day was loaded
         id: check
         run: python monitor.py
 
       # One issue per missing day: a second check the same evening doesn't open another one.
-      # Values go through env, never pasted into the script: an error message can't break or inject into it.
+      # Values go through env, never pasted into the script, so an error message can't break it.
       - name: Open an issue for a missing day
         id: issue
-        if: steps.check.outputs.carregado == 'false'
+        if: steps.check.outputs.loaded == 'false'
         env:
-          TITULO: "Fuel prices not loaded for ${{ steps.check.outputs.dia }}"
-          MENSAGEM: ${{ steps.check.outputs.mensagem }}
+          TITLE: "Fuel prices not loaded for ${{ steps.check.outputs.day }}"
+          MESSAGE: ${{ steps.check.outputs.message }}
         run: |
-          aberta=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number')
-          if [ -z "$aberta" ]; then
-            gh issue create --title "$TITULO" --body "$MENSAGEM"
-            echo "nova=true" >> "$GITHUB_OUTPUT"
+          open_issue=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number')
+          if [ -z "$open_issue" ]; then
+            gh issue create --title "$TITLE" --body "$MESSAGE"
+            echo "new=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Issue #$aberta is already open"
+            echo "Issue #$open_issue is already open"
           fi
 
       - name: Close the issue once the day is loaded
-        if: steps.check.outputs.carregado == 'true'
+        if: steps.check.outputs.loaded == 'true'
         env:
-          TITULO: "Fuel prices not loaded for ${{ steps.check.outputs.dia }}"
+          TITLE: "Fuel prices not loaded for ${{ steps.check.outputs.day }}"
         run: |
-          for n in $(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[].number'); do
+          for n in $(gh issue list --state open --search "\"$TITLE\" in:title" --json number --jq '.[].number'); do
             gh issue close "$n" --comment "Loaded after all: closed by the evening check."
           done
 
-      # Also mark the run as failed, so GitHub's usual failure email arrives too. Only when the issue is new:
-      # a later check of the same missing day (e.g. the 21:47 one) stays quiet instead of emailing again.
+      # Also fail the run, so GitHub's usual failure email arrives too. Only when the issue is new:
+      # a later check of the same missing day stays quiet instead of emailing again.
       - name: Fail if the day is missing
-        if: steps.issue.outputs.nova == 'true'
+        if: steps.issue.outputs.new == 'true'
         run: exit 1
