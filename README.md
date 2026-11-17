@@ -6,57 +6,58 @@
 
 ![Fuel Prices PT dashboard: map of every station coloured by price, with the cheapest stations alongside](docs/images/dashboard.png)
 
-A daily ETL pipeline that collects the price of every fuel at every petrol station in Portugal and models it as a star schema in a hosted PostgreSQL database, building a price history that the official source does not keep. It runs automatically every day on GitHub Actions, and a public Streamlit dashboard reads the warehouse.
+A daily data pipeline that collects the price of every fuel at every petrol station in Portugal and stores it in a PostgreSQL data warehouse. The official source only shows today's prices, so this project builds the price history that nobody else keeps.
+
+It runs by itself every day on GitHub Actions, and a public Streamlit dashboard reads the data.
 
 ![Phase 1 architecture](docs/images/architecture.png)
 
 ## Why this project
 
-Portugal's Directorate-General for Energy and Geology (DGEG) publishes current fuel prices for every station in the country at [precoscombustiveis.dgeg.gov.pt](https://precoscombustiveis.dgeg.gov.pt). It only shows the **current** price: when a station updates, the previous value is gone.
+Portugal's energy authority, DGEG, publishes the current fuel price at every station on [precoscombustiveis.dgeg.gov.pt](https://precoscombustiveis.dgeg.gov.pt). But it only shows the **current** price: when a station changes its price, the old one is gone.
 
-This pipeline takes a snapshot every day and stores it, turning a "right now" view into a historical dataset. That makes it possible to answer questions the source can't, such as how prices evolve by brand, region or station over time.
+This pipeline saves a snapshot every day. Over time that becomes a historical dataset, which answers questions the website can't, like how prices change by brand, region or station.
 
-I built it as a portfolio project while moving from mechanical engineering into data engineering, to practise the full lifecycle of a pipeline: data discovery, extraction, transformation, storage, modelling, scheduling and visualisation.
+I built it as a portfolio project to practise the full life of a data pipeline: finding the data, extracting it, cleaning it, storing it, modelling it, scheduling it and showing it.
 
 ## Data source
 
-The DGEG website has no documented public API. I found the endpoint the site uses internally by inspecting its network traffic in the browser's DevTools:
+The DGEG website has no public API documentation. I found the endpoint the site uses internally by watching its network traffic in the browser's DevTools:
 
 ```
 GET https://precoscombustiveis.dgeg.gov.pt/api/PrecoComb/PesquisarPostos
 ```
 
-Key findings (full details, in Portuguese, in [`notes/api-discovery.md`](notes/api-discovery.md); the exploration itself is in [`notebooks/dgeg_client.ipynb`](notebooks/dgeg_client.ipynb)):
+What I learned about it (full notes, in Portuguese, in [`notes/api-discovery.md`](notes/api-discovery.md), and the exploration in [`notebooks/dgeg_client.ipynb`](notebooks/dgeg_client.ipynb)):
 
-- Each record is one **(station, fuel type)** pair, so a station selling 4 fuels appears 4 times, with its details repeated.
-- The `Quantidade` field holds the **total number of records** for the query (repeated on every row), which is what drives pagination.
-- The API accepts at least 20,000 records per page, so a full national extraction fits in **1 request** (~13,500–14,200 records, varying day to day).
-- Its sort order isn't stable: stations with the same price can swap places between two requests. With smaller pages, rows near the end of one page sometimes came back at the start of the next, and as many were skipped (see [Data quality notes](#data-quality-notes)). One page avoids that.
-- Prices arrive as Portuguese-formatted text (`"1,164 €"`) and need parsing.
+- Each record is one **station + fuel** pair. A station that sells 4 fuels appears 4 times.
+- One request can return the whole country (about 13,500–14,200 records a day).
+- Asking for smaller pages caused problems: the sort order isn't stable, so some rows appeared twice and others were skipped. One big page avoids that.
+- Prices come as Portuguese text (`"1,164 €"`) and have to be converted to numbers.
 
-The data belongs to DGEG. Their terms allow personal, non-commercial use; this project is a non-commercial learning exercise and keeps request volume minimal (one request per run, a backup run that only calls DGEG if the main one didn't load the day, and a one-row check from the evening monitor only when a day is missing).
+The data belongs to DGEG. Their terms allow personal, non-commercial use. This is a non-commercial learning project and makes as few requests as possible (usually one a day).
 
 ## How it works
 
-The pipeline follows an **extract → transform → load** structure, with each step in its own module and class:
+The pipeline follows **extract → transform → load (ETL)**. Each step has its own file and class:
 
-| Step | File | Class | What it does |
-|---|---|---|---|
-| Extract | [`etl/extract.py`](etl/extract.py) | `DgegExtractor` | Requests the DGEG API until every record is collected, retrying temporary errors and downloading again if pages overlap |
-| Transform | [`etl/transform.py`](etl/transform.py) | `Transformer` | Converts the JSON records into a pandas DataFrame and parses prices into numbers (an empty price becomes NaN) |
-| Quality checks | [`etl/quality.py`](etl/quality.py) | `QualityChecker` | Stops a bad day before it reaches the database: volume, missing columns, empty required fields, price range, duplicates |
-| Bronze | [`etl/bronze.py`](etl/bronze.py) | `BronzeStore` | Keeps DGEG's answer exactly as it came (gzipped JSON Lines), locally and in Azure Blob Storage, right after the extract |
-| Load | [`etl/load.py`](etl/load.py) | `RawStore`, `Warehouse` | Saves a dated raw CSV, then loads PostgreSQL through a staging table |
-| Run log | [`etl/runs.py`](etl/runs.py) | `RunLog` | Records every run in `pipeline_runs` |
-| Orchestration | [`pipeline.py`](pipeline.py) | `Pipeline` | Runs the steps in sequence and records the run |
-| Scheduling | [`.github/workflows/daily.yml`](.github/workflows/daily.yml) | | Runs the pipeline every day on GitHub Actions |
-| Monitoring | [`monitor.py`](monitor.py), [`monitor.yml`](.github/workflows/monitor.yml) | `FreshnessMonitor` | Checks every evening that the day was loaded, and opens a GitHub issue if not |
-| Testing | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | | Lints the code and runs the tests on every push |
-| Dashboard | [`dashboard/app.py`](dashboard/app.py) | | Public Streamlit app reading the warehouse, hosted on Streamlit Community Cloud |
+| Step | File | What it does |
+|---|---|---|
+| Extract | [`etl/extract.py`](etl/extract.py) | Downloads all records from the DGEG API, retrying if DGEG is temporarily down |
+| Bronze | [`etl/bronze.py`](etl/bronze.py) | Saves DGEG's answer exactly as it came, locally and in Azure Blob Storage |
+| Transform | [`etl/transform.py`](etl/transform.py) | Turns the JSON into a pandas table and converts prices to numbers |
+| Quality checks | [`etl/quality.py`](etl/quality.py) | Stops a bad day before it reaches the database |
+| Load | [`etl/load.py`](etl/load.py) | Saves a dated CSV, then loads the data into PostgreSQL |
+| Run log | [`etl/runs.py`](etl/runs.py) | Records every run in a `pipeline_runs` table |
+| Orchestration | [`pipeline.py`](pipeline.py) | Runs all the steps in order |
+| Scheduling | [`daily.yml`](.github/workflows/daily.yml) | Runs the pipeline every day on GitHub Actions |
+| Monitoring | [`monitor.py`](monitor.py) | Checks every evening that the day was loaded, and opens a GitHub issue if not |
+| Testing | [`ci.yml`](.github/workflows/ci.yml) | Checks the code and runs the tests on every push |
+| Dashboard | [`dashboard/app.py`](dashboard/app.py) | Public Streamlit app that reads the warehouse |
 
-**Code design.** Each class takes its settings in its constructor (page size and retries, quality thresholds, the CSV folder, the database connection), and `Pipeline` receives the objects it runs instead of creating them. `Pipeline.default()` builds the production setup; the tests build their own, with a fake extractor, lower thresholds or a test database, without patching module variables. [`backfill.py`](backfill.py) reuses `RawStore`, `QualityChecker` and `Warehouse` the same way. The dashboard stays as plain functions: Streamlit reruns the script on every click and caches functions, so classes would add code without a benefit.
+Each class gets its settings when it's created, and `Pipeline` receives the steps it runs instead of creating them. This makes testing easy: a test can give it a fake extractor or a test database.
 
-Example run (each line also starts with a timestamp, omitted here):
+Example run (timestamps removed):
 
 ```
 INFO    pipeline: Run 2 started (schedule) for 2026-10-11
@@ -71,56 +72,53 @@ INFO    etl.load: Loaded PostgreSQL: 13479 price rows for 2026-10-11
 INFO    pipeline: Run 2 finished: 13479 price rows loaded
 ```
 
-## Medallion architecture
+## Data layers (medallion architecture)
 
 ![Medallion architecture](docs/images/medallion.png)
 
-The data moves through three layers, following the **medallion** pattern. Each layer builds on the previous one, and the raw layer is never edited:
+The data moves through three layers. Each one builds on the one before, and the raw layer is never edited:
 
-| Layer | Purpose | Phase 1 (today) |
+| Layer | What it holds | Where it is today |
 |---|---|---|
-| **Bronze** | Faithful copy of the source, kept for reprocessing | Since 2026-10-31: DGEG's answer untouched, one gzipped JSON Lines file per run in Azure Blob Storage (`bronze/dgeg_pesquisar_postos/date=YYYY-MM-DD/`). Before that: a dated CSV per run, kept as a GitHub Actions artifact |
-| **Silver** | Cleaned, typed data in one consistent format | `stg_precos`: typed staging table in PostgreSQL, refilled on every run |
-| **Gold** | Business-ready model for analysis | The star schema in Neon: `fact_precos` and three dimensions |
+| **Bronze** | The raw data, exactly as DGEG sent it | One compressed JSON file per run in Azure Blob Storage (since 2026-10-31; before that, a CSV per run) |
+| **Silver** | Cleaned data with proper types | `stg_precos`, a staging table in PostgreSQL, refilled on every run |
+| **Gold** | Data modelled for analysis | The star schema in PostgreSQL (Neon) |
 
-If the gold layer ever needs rebuilding, it can be reloaded from the raw CSVs with [`backfill.py`](backfill.py). It runs the same quality checks as the daily run and skips a day that fails them: the daily run saves its CSV before the checks, so failed days have a CSV too.
-
-Phase 1 is a lightweight version of the pattern: the silver layer is a staging table rather than a stored history. The bronze layer moved to Azure first, on 2026-10-31: GitHub deletes artifacts after 90 days and DGEG keeps no history, so it was the one layer that couldn't wait. The older artifact CSVs (which already include the parsed price column) are copied to `bronze/legacy_artifacts/` by [`archive-artifacts.yml`](.github/workflows/archive-artifacts.yml). JSON Lines under `date=` folders is what Spark reads directly, so Databricks can build silver Delta Lake tables from it in Phase 3.
+The bronze layer went to Azure first because it was the most urgent: DGEG keeps no history and GitHub deletes old files after 90 days. The old CSVs are copied to Azure by [`archive-artifacts.yml`](.github/workflows/archive-artifacts.yml). If the warehouse ever needs to be rebuilt, [`backfill.py`](backfill.py) reloads it from the saved CSVs.
 
 ## Automation
 
-The pipeline runs every day on **GitHub Actions** ([`daily.yml`](.github/workflows/daily.yml)) and writes to a **hosted PostgreSQL database on [Neon](https://neon.com)**, so it runs without any local machine switched on.
+The pipeline runs every day on **GitHub Actions** and writes to a hosted **PostgreSQL database on [Neon](https://neon.com)**, so no computer of mine needs to be on.
 
-- **Schedule:** a main run every day at 10:17 UTC and a backup at 13:17 UTC. GitHub can start scheduled jobs hours late (the original 19:17 runs started 3–5 hours late, some after midnight in Lisbon; in late October the 13:17 run was starting around 18:30), so both are scheduled well before they're needed and still finish the same day. The backup checks the run log and stops at once if the day is already loaded, so DGEG isn't called for nothing. The first successful snapshot of the day wins: if prices change between the two runs, the backup doesn't replace them. Runs can also be started manually from the Actions tab.
-- **Run log:** every run adds a row to `pipeline_runs`: start and end time, the snapshot date, who started it (schedule, backup or manual), status (success, failed or skipped), rows extracted and loaded, the error message, and the GitHub Actions run ID. The row is written on its own connection, outside the load's transaction, so a failed load still leaves a "failed" row instead of disappearing with the rollback.
-- **Missing-day alert:** GitHub emails about a run that fails, but a day where no run happens at all (a cron started after midnight, as on 2026-10-05) sends nothing. Every evening (18:47 and 21:47 UTC) [`monitor.yml`](.github/workflows/monitor.yml) runs [`monitor.py`](monitor.py), which checks `pipeline_runs` for a successful snapshot of the day. If there isn't one, it opens a GitHub issue (email and mobile app) saying why: no run at all, or the last run's status and error. It also makes one one-row request to DGEG and says whether DGEG is answering right now, so the issue tells you whether a manual run can work yet or you have to wait (as on 2026-10-30, when DGEG's price search returned HTTP 500 for over a day). The monitor run is marked as failed only when it opens a new issue, so a missing day sends one alert, not one per check. The later check closes the issue if a late or manual run loaded the day after all. It uses the workflow's own token, so no extra secret is needed.
-- **Quality checks:** before the database is touched, the day's data must have 12,000–16,000 rows (recent days: about 13,500), every column the load uses, no empty station ID, name, fuel or price, every price between 0.50 and 5.00 €, and no duplicated station × fuel. Any failure stops the run with one message listing every problem, and the run is recorded as failed, so a partial or garbled day never reaches the warehouse. The raw CSV is still saved, to see what was wrong. The thresholds come from real snapshots and live at the top of [`etl/quality.py`](etl/quality.py).
-- **Retries:** a connection error, timeout or 5xx response from DGEG is retried 3 times, after 30 seconds, 2 minutes and 5 minutes, so a run rides out an outage of about 8 minutes. Each request waits up to 60 seconds: DGEG's own server gives up on a slow query at 30 seconds, so the log shows its HTTP 500 instead of a timeout on our side. A 4xx response means the request itself is wrong, so it fails at once. If all attempts fail, the backup run tries again later. The job's 20-minute timeout leaves room for the retries. A download whose pages don't add up (a station × fuel repeated, or fewer rows than the API announced) is repeated from the start, up to 3 times, a minute apart; if it's still wrong, the quality checks fail the run with the reason.
-- **Logging:** every line has a timestamp, level and module (see the example above), so a GitHub Actions log shows when and where something happened.
-- **Credentials:** the database connection comes from **GitHub Secrets**, exposed to the job as environment variables. No password is stored in the code or the repository.
-- **Bronze layer:** right after the extract, before anything else can fail, [`BronzeStore`](etl/bronze.py) writes DGEG's answer exactly as it came and uploads it to **Azure Blob Storage**. Files are never overwritten: a second run on the same day adds a new file. If Azure fails, the day is still loaded into the warehouse (so it isn't lost there too), the run log notes `Bronze not saved` and the job turns red, so GitHub emails. Without the `AZURE_STORAGE_CONNECTION_STRING` secret, the raw JSON is kept in the artifact only.
-- **Raw snapshots:** GitHub's machines are wiped after each run, so the day's CSV and bronze file are uploaded as a **workflow artifact**, kept for 90 days. The upload runs even if the database step or the Azure upload fails, so the raw data is never lost to a load error.
-- **Pinned dependencies:** every package in the `requirements` files has an exact version, so a new release can't break the daily run without a code change. [Dependabot](.github/dependabot.yml) proposes updates once a week as grouped pull requests, and CI tests each one before it's merged.
-- **Correct dates:** the job runs with the `Europe/Lisbon` time zone, so each snapshot gets the Portuguese date.
-- **Safe reruns:** because loads are idempotent, a retried or manual run on the same day never duplicates data.
+- **Schedule.** A main run at 10:17 UTC and a backup at 13:17 UTC. GitHub often starts scheduled jobs hours late, so both are early enough to finish the same day. The backup does nothing if the day is already loaded. Runs can also be started by hand.
+- **Run log.** Every run is recorded in `pipeline_runs`: when it ran, who started it, whether it worked, how many rows it loaded and any error.
+- **Missing-day alert.** If no run happens at all, GitHub sends no email. So every evening [`monitor.py`](monitor.py) checks that the day was loaded. If not, it opens a GitHub issue saying what went wrong and whether DGEG is currently up. A later check closes the issue if the day was loaded after all.
+- **Quality checks.** Before anything is loaded, the day must have 12,000–16,000 rows, all the needed columns, no empty key fields, prices between 0.50 and 5.00 €, and no duplicates. If any check fails, the run stops and nothing reaches the warehouse.
+- **Retries.** If DGEG is down or slow, the request is retried 3 times (after 30 seconds, 2 minutes and 5 minutes). If that still fails, the backup run tries later.
+- **Raw data is never lost.** DGEG's answer is saved to Azure right after the download, before anything else can fail. The day's files are also kept on GitHub for 90 days.
+- **Secrets.** Database and Azure credentials are stored in GitHub Secrets, never in the code.
+- **Safe reruns.** Running the pipeline twice on the same day never creates duplicate data.
+- **Pinned dependencies.** Every package has a fixed version. [Dependabot](.github/dependabot.yml) suggests updates once a week, and the tests run on each one before it's merged.
+- **Correct dates.** The job runs in the `Europe/Lisbon` time zone, so each snapshot gets the Portuguese date.
 
 ## Testing
 
-Every push runs the [CI workflow](.github/workflows/ci.yml) on GitHub Actions: Ruff checks the code, then pytest runs 68 tests. Tests are grouped in classes by behaviour (for example `TestPagination`, `TestRetries`, `TestStationHistory`), and fakes such as `FakeDgegApi` and `FakeExtractor` are small classes too.
+Every push runs the [CI workflow](.github/workflows/ci.yml): Ruff checks the code style, then pytest runs the tests.
 
 | Tests | What they check |
 |---|---|
-| [`test_transform.py`](tests/test_transform.py) | Price parsing (`"1,164 €"` → `1.164`), garbled values failing loudly, an empty price becoming NaN, the transform on a real API sample |
-| [`test_extract.py`](tests/test_extract.py) | Pagination against a fake API: stops at the total, stops on an empty page, retries temporary errors, fails at once on a 4xx, gives up after 4 attempts, downloads again when pages overlap, the one-request DGEG availability check. The tests never call DGEG. |
-| [`test_bronze.py`](tests/test_bronze.py) | The bronze layer with a fake Azure container: records kept exactly as sent (text prices, Portuguese characters), file naming, a second run adding a file instead of replacing one, the local copy surviving a failed upload |
-| [`test_backfill.py`](tests/test_backfill.py) | The backfill, with a fake warehouse: a day that failed the quality checks (its CSV exists) is skipped, and prices read back from the CSV are numbers again |
-| [`test_quality.py`](tests/test_quality.py) | The quality checks: a normal day passes; too few rows, an out-of-range price, an empty required field or price, a duplicate or a missing column each fail; all problems reported at once |
-| [`test_load.py`](tests/test_load.py) | Against a real PostgreSQL: every table filled, prices stored exactly, loading a day twice changes nothing, SCD Type 2 versions, a failed load leaving nothing behind, a warning when a day loaded out of order loses rows, and raw CSVs named and listed by date |
-| [`test_pipeline.py`](tests/test_pipeline.py) | The run log: successful and failed runs recorded (a failed load still leaves its "failed" row), the backup skipping a day already loaded, manual runs always going ahead, a day failing the quality checks never reaching the database, an empty DGEG answer failing with a clear message, the raw answer saved even when the checks fail, an Azure failure still loading the day but failing the job |
-| [`test_monitor.py`](tests/test_monitor.py) | The evening check, with a fake run log: which day it checks (including a check GitHub started after midnight), a loaded day passing, a day with no run or a failed run reported with the reason, and the alert saying whether DGEG is answering (with a fake DGEG) |
+| [`test_transform.py`](tests/test_transform.py) | Prices are converted correctly (`"1,164 €"` → `1.164`) and bad values fail loudly |
+| [`test_extract.py`](tests/test_extract.py) | Downloading, retries and error handling, using a fake API (the tests never call DGEG) |
+| [`test_bronze.py`](tests/test_bronze.py) | Raw data is saved exactly as received, and files are never overwritten |
+| [`test_quality.py`](tests/test_quality.py) | A normal day passes, and each kind of bad data fails |
+| [`test_load.py`](tests/test_load.py) | Loading into a real PostgreSQL: correct data, no duplicates on rerun, station history, nothing kept if a load fails |
+| [`test_pipeline.py`](tests/test_pipeline.py) | The run log, the backup run, and bad or empty days never reaching the database |
+| [`test_backfill.py`](tests/test_backfill.py) | Reloading from old CSVs, skipping days that failed the checks |
+| [`test_monitor.py`](tests/test_monitor.py) | The evening check finds missing days and reports why |
 
-- **Separate database.** The database tests never touch the real data: CI starts a temporary PostgreSQL for each run, and locally they use a `fuel_prices_test` database. A guard refuses to run them against any database whose name doesn't end in `_test`.
-- **Testing the tests.** To check the tests catch real bugs, I broke the loading SQL on purpose. Replacing `IS DISTINCT FROM` with `<>` still passed every test at first: in SQL, a comparison with NULL gives "unknown", so `<>` silently misses changes such as coordinates added to a station that had none. I added a test for that case, and it now fails as soon as the comparison is broken.
+The database tests use a separate test database and refuse to run against any database whose name doesn't end in `_test`, so the real data is never touched.
+
+**Testing the tests.** To check that the tests catch real bugs, I broke the loading SQL on purpose. One change (`IS DISTINCT FROM` → `<>`) still passed every test, because in SQL a comparison with NULL never counts as "different". I added a test for that case, and it now fails when the code is broken.
 
 **Running the tests locally**
 
@@ -131,91 +129,70 @@ ruff check .
 pytest -v
 ```
 
-Without a test database, the database tests are skipped with a message and the others still run. The connection is tried once per run with a 3-second timeout, so a missing database skips them in seconds instead of hanging.
-
-To use a different database, set `TEST_DATABASE_URL`. It doesn't have to be local: a hosted test database (for example a separate Neon database) works too, as long as its name ends in `_test`.
+Without a test database, the database tests are skipped and the others still run. To use another database, set `TEST_DATABASE_URL` (its name must end in `_test`).
 
 ## Dashboard
 
-The [live dashboard](https://fuel-prices-pt.streamlit.app/) shows today's average prices on a price board, then lets anyone explore the data by fuel, period, district, municipality, station type, brand or station name:
+The [live dashboard](https://fuel-prices-pt.streamlit.app/) shows today's average prices, and lets you filter by fuel, period, district, municipality, brand or station:
 
 - **Map** of every station, coloured from cheapest to most expensive, with the 10 cheapest alongside
-- **Evolution** of average prices over time, by district or comparing several fuels
-- **Stations**: the full filtered list, downloadable as CSV
-- **Price changes**: which stations raised or cut prices since the previous snapshot
-- **Station history**: one station's prices over time, plus every version of its details (SCD Type 2)
+- **Evolution** of average prices over time
+- **Stations**: the full list, downloadable as CSV
+- **Price changes** since the previous snapshot
+- **Station history**: one station's prices and details over time
 - **Brands**: average price per brand
 - **How it's built**: the pipeline behind the data
 
-How it connects to the warehouse:
+How it reads the data:
 
-- **Read-only access.** The app uses its own database user, [`dashboard_reader`](sql/dashboard_role.sql), which can only `SELECT` from the view and the dimensions. Its credentials live in Streamlit Cloud's secrets, never in the repository.
-- **One view as the interface.** The app reads [`vw_precos`](sql/views.sql), the star schema joined into one table, plus a `dias_desde_atualizacao` column used to leave out stale prices.
-- **Filtering in SQL.** Every filter becomes a parameterised `WHERE` clause, and history is aggregated in the database, so only the rows needed reach the app.
-- **Caching.** Query results are cached for an hour: the data changes once a day, so most visits don't touch the database at all.
-- **Honest charts.** Days without a snapshot are drawn as dotted segments, and price changes are always compared with the previous snapshot actually available.
+- It uses a **read-only database user** ([`dashboard_role.sql`](sql/dashboard_role.sql)) that can only read, never change anything.
+- It reads from one **view**, [`vw_precos`](sql/views.sql), which joins the star schema into one table.
+- **Filters run in SQL**, so only the rows needed reach the app.
+- Results are **cached for an hour**, since the data only changes once a day.
 
 ## Data model
 
 ![Star schema](docs/images/star_schema.png)
 
-A **star schema** in PostgreSQL, defined in [`sql/schema.sql`](sql/schema.sql):
+A **star schema** in PostgreSQL ([`sql/schema.sql`](sql/schema.sql)): one fact table with the prices, and three dimension tables that describe them.
 
-| Table | One row = | Key |
+| Table | One row is | Key |
 |---|---|---|
-| `fact_precos` | one station × fuel × snapshot day | (`data_key`, `posto_sk`, `combustivel_id`) |
-| `dim_postos` | one **version** of a station (SCD Type 2) | generated `posto_sk`; DGEG's `Id` kept as `posto_id` |
-| `dim_combustivel` | one fuel type | generated ID |
-| `dim_data` | one calendar day | integer date, e.g. `20261004` |
+| `fact_precos` | one station × fuel × day | (`data_key`, `posto_sk`, `combustivel_id`) |
+| `dim_postos` | one **version** of a station (see below) | `posto_sk` |
+| `dim_combustivel` | one fuel type | `combustivel_id` |
+| `dim_data` | one calendar day | `data_key`, e.g. `20261004` |
 
-`fact_precos` is a **periodic snapshot fact table**: every station's price is recorded every day, even when it hasn't changed, so "what was the price on day X?" is a simple lookup.
+Every station's price is stored every day, even when it hasn't changed, so "what was the price on day X?" is a simple lookup.
 
-The day's rows are bulk-copied (`COPY`) into the staging table, then [`sql/load_from_staging.sql`](sql/load_from_staging.sql) loads the dimensions first and the fact table second.
+Each run copies the day's data into a staging table, then [`sql/load_from_staging.sql`](sql/load_from_staging.sql) fills the dimensions first and the fact table after.
 
-### Station history: SCD Type 2
+### Station history (SCD Type 2)
 
-Stations change: a GALP becomes a PRIO, a station is renamed or moves. `dim_postos` is a **slowly changing dimension (Type 2)**: instead of overwriting a station's details, it closes the old row and adds a new **version**, so every price keeps the details that were true on its day.
+Stations change: a GALP becomes a PRIO, or a station is renamed. Instead of overwriting the old details, `dim_postos` closes the old row and adds a new **version**. This is called a *slowly changing dimension, Type 2*. Every price stays linked to the station details that were true on that day.
 
 | posto_sk | posto_id | marca | valido_de | valido_ate | atual |
 |---|---|---|---|---|---|
 | 1 | 94625 | GALP | 2026-09-27 | 2026-10-03 | false |
 | 3 | 94625 | PRIO | 2026-10-04 | 9999-12-31 | true |
 
-*(illustrative example)*
+*(example)*
 
-- **Surrogate and natural keys.** `posto_sk` is generated, one per version, and is what the fact table points to. `posto_id` is DGEG's own station `Id`, shared by all versions of a station.
-- **Change detection.** Each run compares the incoming details with the current version, column by column, using `IS DISTINCT FROM` so that missing values (NULL) compare as equal instead of triggering false changes.
-- **Point-in-time lookup.** Each price is linked to the version valid on its snapshot day: `snapshot_date BETWEEN valido_de AND valido_ate`.
-- **Enforced in the database.** A partial unique index allows at most one current version (`atual`) per station.
-- **Known limits.** Snapshots must be loaded in date order (daily runs are; `backfill.py` sorts its files): a day loaded after a later one loses the prices of stations whose current version starts later. There's no error, so `Warehouse.load` logs a warning when fewer rows reach `fact_precos` than were staged. A change is dated to the first snapshot that shows it, so precision is one day.
+- `posto_sk` is a new ID for each version. `posto_id` is DGEG's station ID, the same for all versions.
+- Changes are found by comparing each column with `IS DISTINCT FROM`, which handles empty values (NULL) correctly.
+- The database allows only one current version (`atual = true`) per station.
+- Days must be loaded in date order. The daily run always does this, and `backfill.py` sorts its files.
 
 ### Design decisions
 
-- **Idempotent loads.** The fact table's primary key is (day, station, fuel), and inserts use `ON CONFLICT DO NOTHING`. Rerunning the pipeline on the same day never creates duplicates.
-- **One transaction per run.** Staging, dimensions and facts load together: if any step fails, nothing from that run is kept.
-- **Dimensions before facts.** Foreign keys guarantee every price points to an existing station, fuel and date.
-- **Two dates per price.** `data_key` is when the pipeline captured the price; `data_atualizacao` is when the station last changed it. An old `data_atualizacao` flags a possibly stale price.
-- **Exact prices.** Prices are `NUMERIC(6,3)`, not floating point, so values are stored exactly.
-- **Append-only bronze layer.** Each run adds a new dated CSV and never edits old ones.
+- **No duplicates.** The fact table's key is (day, station, fuel), and inserts skip rows that already exist.
+- **All or nothing.** Each run loads in one transaction: if any step fails, nothing from that run is kept.
+- **Two dates per price.** `data_key` is when the pipeline saved the price; `data_atualizacao` is when the station last changed it. An old `data_atualizacao` means the price may be out of date.
+- **Exact prices.** Prices are stored as `NUMERIC(6,3)`, not floats, so there are no rounding errors.
 
 ### Example query
 
-Average simple diesel price per district, on the latest day loaded, written against the star schema:
-
-```sql
-SELECT p.distrito,
-       ROUND(AVG(f.preco), 3) AS preco_medio,
-       COUNT(*)               AS postos
-FROM fact_precos f
-JOIN dim_postos      p USING (posto_sk)
-JOIN dim_combustivel c USING (combustivel_id)
-WHERE c.nome = 'Gasóleo simples'
-  AND f.data_key = (SELECT MAX(data_key) FROM fact_precos)
-GROUP BY p.distrito
-ORDER BY preco_medio;
-```
-
-The same question through the view [`vw_precos`](sql/views.sql), which joins the star schema into one readable table:
+Average simple diesel price per district, on the latest day:
 
 ```sql
 SELECT distrito, ROUND(AVG(preco), 3) AS preco_medio, COUNT(*) AS postos
@@ -226,121 +203,102 @@ GROUP BY distrito
 ORDER BY preco_medio;
 ```
 
-Both queries return the same result. For the snapshot of 2026-10-04:
+Result for 2026-10-04 (cheapest and most expensive districts):
 
 | distrito | preco_medio (€/L) | postos |
 |---|---:|---:|
 | Braga | 2.226 | 240 |
 | Aveiro | 2.227 | 232 |
 | Leiria | 2.230 | 211 |
-| Santarém | 2.231 | 205 |
-| Castelo Branco | 2.236 | 79 |
-| Viseu | 2.237 | 147 |
-| Porto | 2.240 | 408 |
-| Coimbra | 2.243 | 145 |
-| Guarda | 2.245 | 92 |
-| Viana do Castelo | 2.245 | 65 |
-| Setúbal | 2.248 | 175 |
-| Faro | 2.254 | 172 |
-| Portalegre | 2.254 | 46 |
-| Évora | 2.256 | 74 |
-| Vila Real | 2.258 | 83 |
+| ... | ... | ... |
 | Beja | 2.258 | 78 |
 | Lisboa | 2.260 | 343 |
 | Bragança | 2.262 | 72 |
 
-The gap between the cheapest district (Braga) and the most expensive (Bragança) is 3.6 cents per litre, about 1.80 € on a 50-litre tank. Districts with equal averages may appear in either order.
+The difference between Braga and Bragança is 3.6 cents per litre, about 1.80 € on a 50-litre tank.
 
 ### Data quality notes
 
-- **Stale prices.** `data_atualizacao` shows that a handful of prices haven't been changed by their station in over a year (16 of 13,627 rows on 2026-10-04, the oldest from August 2024). They are kept in the warehouse exactly as DGEG reports them; deciding what is too old to trust is left to the analysis layer.
-- **Data gaps.** There is no snapshot for **2026-10-05**: GitHub started that day's scheduled run after midnight in Lisbon, so it was labelled 2026-10-06. DGEG keeps no history, so the day can't be recovered. Until 2026-10-11, capture times also varied between about 23:20 and 01:50 Lisbon time for the same reason. The data is left as captured: each snapshot holds the prices in force when it was taken. The earlier schedule and the run log (see [Automation](#automation)) now prevent and expose this. The days before 2026-10-04, apart from a first manual snapshot on 2026-09-27, predate the daily schedule.
-- **Page overlaps (found 2026-10-16).** With 10,000 records per page, about half of the downloads had a few rows from the end of page 1 repeated at the start of page 2, and as many rows skipped, with the total still right. The duplicate check caught it on 2026-10-16 and stopped the run. The pipeline now asks for 20,000 records per page, so a day fits in one request. Days loaded from 2026-10-11 on passed the duplicate check, so they weren't affected; earlier snapshots, taken before the checks existed, may be missing a few station × fuel prices.
-- **Text encoding.** All files and tables use **UTF-8**, so Portuguese characters (`ç`, `ã`, `ó`...) are stored exactly as DGEG sends them. Excel on Windows doesn't assume UTF-8 when a CSV is double-clicked and may show `Ã§` instead of `ç`. The data is correct: open the file with **Data → From Text/CSV** and choose **65001: Unicode (UTF-8)** as the file origin.
+- **Old prices.** A few prices haven't been updated by their station in over a year (16 of 13,627 on 2026-10-04). They are kept as DGEG reports them.
+- **Missing day.** There is no snapshot for **2026-10-05**: GitHub started that run after midnight, so it was saved as the next day. DGEG keeps no history, so it can't be recovered. The earlier schedule and the evening alert now prevent this.
+- **Duplicated rows (found 2026-10-16).** When the pipeline downloaded in two pages, some rows were repeated and others skipped. The duplicate check caught it, and the pipeline now downloads everything in one request. Snapshots from before 2026-10-11 may be missing a few prices.
+- **Portuguese characters.** Everything is stored in UTF-8. If Excel shows `Ã§` instead of `ç` when you open a CSV, open it with **Data → From Text/CSV** and choose **65001: Unicode (UTF-8)**.
 
 ## Roadmap
 
 ![Roadmap](docs/images/roadmap.png)
 
-What changed and when, with the reasons, is in the [changelog](CHANGELOG.md).
+The full history of changes is in the [changelog](CHANGELOG.md).
 
 **Phase 1: MVP** *(complete)*
 - [x] Discover and document the DGEG API
-- [x] Modular ETL in Python (requests, pandas)
-- [x] Daily, dated CSV snapshots
-- [x] PostgreSQL star schema with idempotent loads
+- [x] ETL in Python (requests, pandas)
+- [x] Daily CSV snapshots
+- [x] PostgreSQL star schema with safe reruns
 - [x] Station history with SCD Type 2
-- [x] Hosted PostgreSQL (Neon) + daily scheduling with GitHub Actions
-- [x] Public Streamlit dashboard with a read-only database user
+- [x] Hosted database (Neon) + daily scheduling with GitHub Actions
+- [x] Public Streamlit dashboard
 
 **Production readiness** *(in progress)*
-- [x] Unit and database tests (pytest) with CI on every push
-- [x] Data quality checks that stop a bad load (volume, schema, price ranges)
-- [x] Run log table (`pipeline_runs`) and a backup run that skips a day already loaded
-- [x] Retries for temporary API errors, and logging with timestamps and levels
-- [x] Object-oriented ETL: one class per step, passed into `Pipeline` so tests can swap any of them
-- [x] Evening alert (GitHub issue) when a day has no successful snapshot
-- [x] Hardening after the 2026-10-30 DGEG outage: longer retries, one alert per missing day, the alert says whether DGEG is up
+- [x] Tests (pytest) with CI on every push
+- [x] Data quality checks that stop a bad load
+- [x] Run log and a backup run
+- [x] Retries and proper logging
+- [x] One class per ETL step, easy to test
+- [x] Evening alert when a day is missing
+- [x] Better handling of DGEG outages
 
 **Phase 2: Cloud storage**
-- [x] Bronze layer in Azure Data Lake (untouched API responses), plus pinned dependencies with Dependabot
-- [ ] Explicit bronze / silver / gold layers
+- [x] Bronze layer in Azure (raw API responses)
+- [ ] Separate bronze / silver / gold layers
 
 **Phase 3: Distributed processing**
-- [ ] Databricks + Spark transformations
+- [ ] Databricks + Spark
 - [ ] Delta Lake tables
 - [ ] Orchestration with Databricks Workflows or Azure Data Factory
 - [ ] Power BI dashboard
-- [ ] Long-term price history out of Neon: `fact_precos` grows about 1.65 MB a day (~600 MB a year at today's volume), so check the Neon plan's storage limit before then
+- [ ] Move the long-term history out of Neon (it grows about 600 MB a year)
 
 ## Project structure
 
 ```
-├── .devcontainer/
-│   └── devcontainer.json       # GitHub Codespaces setup: Python 3.14 + all dependencies
-├── .github/dependabot.yml      # weekly pull requests with dependency updates
 ├── .github/workflows/
-│   ├── daily.yml               # daily schedule on GitHub Actions
-│   ├── monitor.yml             # evening check: opens an issue if the day wasn't loaded
-│   ├── archive-artifacts.yml   # one-off: copies the old artifacts to Azure before they expire
+│   ├── daily.yml               # daily schedule
+│   ├── monitor.yml             # evening check for missing days
+│   ├── archive-artifacts.yml   # one-off: copies old files to Azure
 │   └── ci.yml                  # lint + tests on every push
-├── .streamlit/
-│   ├── config.toml             # dashboard theme (colours, font)
-│   └── secrets.toml.example    # template for the dashboard's database settings
 ├── dashboard/
-│   ├── app.py                  # Streamlit dashboard
-│   └── requirements.txt        # dashboard dependencies (separate from the pipeline's)
+│   └── app.py                  # Streamlit dashboard
 ├── etl/
-│   ├── extract.py              # DgegExtractor: API requests and pagination
-│   ├── bronze.py               # BronzeStore: DGEG's raw answer, locally and in Azure Blob Storage
-│   ├── transform.py            # Transformer: cleaning and parsing
-│   ├── quality.py              # QualityChecker: data quality checks that stop a bad load
-│   ├── load.py                 # RawStore (bronze CSV) + Warehouse (PostgreSQL load)
-│   └── runs.py                 # RunLog: pipeline_runs, written outside the load's transaction
+│   ├── extract.py              # download from the DGEG API
+│   ├── bronze.py               # save the raw data (local + Azure)
+│   ├── transform.py            # clean and convert
+│   ├── quality.py              # quality checks
+│   ├── load.py                 # save CSV + load PostgreSQL
+│   └── runs.py                 # run log
 ├── sql/
-│   ├── schema.sql              # star schema: tables, keys, constraints
-│   ├── load_from_staging.sql   # staging → dimensions (SCD Type 2) → fact table
-│   ├── views.sql               # vw_precos: star schema joined for reading
-│   └── dashboard_role.sql      # permissions for a read-only dashboard user
-├── tests/                      # unit tests + database tests (pytest)
-├── pipeline.py                 # Pipeline: runs the full ETL
-├── backfill.py                 # Backfill: loads existing raw CSVs into PostgreSQL
-├── monitor.py                  # FreshnessMonitor: was the day loaded? (used by monitor.yml)
-├── notebooks/                  # initial API exploration (dgeg_client.ipynb + a raw sample)
-├── notes/                      # API discovery notes (api-discovery.md)
-├── docs/images/                # diagrams and dashboard screenshot
-├── CHANGELOG.md                # what changed and when, newest first
+│   ├── schema.sql              # star schema tables
+│   ├── load_from_staging.sql   # staging → dimensions → fact table
+│   ├── views.sql               # vw_precos view
+│   └── dashboard_role.sql      # read-only user for the dashboard
+├── tests/                      # pytest tests
+├── notebooks/                  # first API exploration
+├── notes/                      # API discovery notes
+├── docs/images/                # diagrams and screenshot
+├── pipeline.py                 # runs the full ETL
+├── backfill.py                 # reloads old CSVs into PostgreSQL
+├── monitor.py                  # checks if the day was loaded
+├── CHANGELOG.md                # history of changes
 ├── .env.example                # template for database settings
-├── pyproject.toml              # pytest and Ruff settings
 ├── requirements.txt            # pipeline dependencies
-└── requirements-dev.txt        # pipeline dependencies + pytest + Ruff
+└── requirements-dev.txt        # + pytest and Ruff
 ```
 
-The `data/` folder is created when the pipeline runs and is excluded from version control, as are all `.env` files except the template.
+The `data/` folder is created when the pipeline runs and isn't committed to Git.
 
 ## How to run
 
-Requires Python 3.14 (the version it was built and tested with) and PostgreSQL (tested with 18 locally, and Neon).
+You need Python 3.14 and PostgreSQL (tested with version 18 locally, and with Neon).
 
 **1. Get the code and install dependencies**
 
@@ -359,7 +317,7 @@ pip install -r requirements.txt
 
 **2. Set up the database**
 
-Use a local PostgreSQL or a hosted one such as Neon. Create a database, then the tables:
+Use a local PostgreSQL or a hosted one like Neon:
 
 ```bash
 psql -U postgres -c "CREATE DATABASE fuel_prices ENCODING 'UTF8';"   # local only
@@ -367,47 +325,45 @@ psql "<your connection string>" -f sql/schema.sql
 psql "<your connection string>" -f sql/views.sql
 ```
 
-Copy `.env.example` to `.env` and fill in your connection settings. For a hosted database, include `PGSSLMODE=require`.
+Copy `.env.example` to `.env` and fill in your connection settings. For a hosted database, add `PGSSLMODE=require`.
 
 **3. Run**
 
 ```bash
-python pipeline.py    # today's snapshot: raw JSON (data/bronze/, + Azure if set in .env) + CSV + database
-python backfill.py    # optional: load any older CSVs from data/raw/ (days failing the quality checks are skipped)
+python pipeline.py    # today's snapshot
+python backfill.py    # optional: load older CSVs from data/raw/
 ```
 
-Both are safe to rerun: rows that already exist are skipped.
+Both are safe to run more than once.
 
-**4. Optional: run the dashboard locally**
+**4. Optional: run the dashboard**
 
 ```bash
 pip install -r dashboard/requirements.txt
 streamlit run dashboard/app.py
 ```
 
-It reads `.streamlit/secrets.toml`: copy `.streamlit/secrets.toml.example` and fill it in, ideally with a read-only user created with [`sql/dashboard_role.sql`](sql/dashboard_role.sql).
-
-In **GitHub Codespaces**, the dev container installs everything and creates `.streamlit/secrets.toml` from the template: fill it in, then run `streamlit run dashboard/app.py`.
+Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and fill it in (ideally with the read-only user from [`sql/dashboard_role.sql`](sql/dashboard_role.sql)). In **GitHub Codespaces**, everything is installed for you and the file is created from the template.
 
 **5. Optional: schedule it on your own fork**
 
-Add four repository secrets under **Settings → Secrets and variables → Actions**: `PGHOST`, `PGUSER`, `PGPASSWORD` and `PGDATABASE`. The workflow in `.github/workflows/daily.yml` then runs every day, or on demand from the Actions tab.
+Add these secrets under **Settings → Secrets and variables → Actions**: `PGHOST`, `PGUSER`, `PGPASSWORD` and `PGDATABASE`. The daily workflow will then run on its own.
 
-For the bronze layer in Azure, create a storage account (with **hierarchical namespace** on, i.e. Data Lake Storage Gen2, which Databricks reads best) and a container named `bronze`, then add a connection string as a fifth secret, `AZURE_STORAGE_CONNECTION_STRING`. Without it the pipeline still runs, keeping the raw JSON in the artifact only.
+For the Azure bronze layer, also:
 
-Use a **SAS** (shared access signature: a key limited to the actions you choose), not the account key from **Access keys**: the account key can also delete files, and bronze is the one layer that can't be rebuilt.
+1. Create a storage account (with **hierarchical namespace** on) and a container named `bronze`.
+2. Create a **SAS key** (Security + networking → Shared access signature) with only **Blob**, **Object** and **Read, Write, Create** permissions. Don't use the account key: it can also delete files. Set an expiry date and remember to renew it.
+3. Copy the **connection string** into a secret named `AZURE_STORAGE_CONNECTION_STRING`.
+4. Turn on **soft delete for blobs** so deleted files can be restored.
 
-1. Storage account → **Security + networking → Shared access signature**.
-2. Allowed services: **Blob** only. Allowed resource types: **Object** only. Permissions: **Read, Write, Create** only (no Delete, no List). Set an expiry, e.g. one year, and put a reminder in your calendar: when it expires the pipeline keeps loading Neon but the job fails with `Bronze not saved`.
-3. **Generate SAS and connection string**, and copy the **Connection string** into the secret.
-4. Also turn on **Data management → Data protection → Enable soft delete for blobs** (e.g. 30 days), so even a deleted file can be restored.
+Without the Azure secret, the pipeline still runs and keeps the raw data on GitHub only.
 
 ## Tech stack
 
-**Now:** Python, requests, pandas, PostgreSQL, psycopg, SQL, Neon, Azure Blob Storage, GitHub Actions, Streamlit, Plotly, Streamlit Community Cloud, pytest, Ruff, Git/GitHub
-**Planned:** Azure Data Lake, Databricks, Spark, Delta Lake, Power BI
+**Now:** Python, pandas, requests, SQL, PostgreSQL, Neon, Azure Blob Storage, GitHub Actions, Streamlit, Plotly, pytest, Ruff, Git
+**Planned:** Databricks, Spark, Delta Lake, Power BI
 
 ## Author
 
-**André Francisco**: mechanical engineer (MSc, Instituto Superior Técnico) moving into data engineering.
+**André Francisco**: mechanical engineer (MSc, Instituto Superior Técnico).
 [LinkedIn](https://www.linkedin.com/in/your-profile) · [GitHub](https://github.com/amffpsa24-art)
