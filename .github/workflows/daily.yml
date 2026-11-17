@@ -42,10 +42,10 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -64,7 +64,7 @@ jobs:
       # "always()" uploads it even if a later step failed, so the raw data is never lost.
       - name: Upload raw snapshot
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: raw-snapshot-${{ github.run_id }}
           path: data/bronze/
